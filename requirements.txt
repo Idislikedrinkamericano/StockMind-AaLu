@@ -1,0 +1,12 @@
+# StockMind (+ web demo) dependencies.
+# Merged from the original pyproject.toml plus gradio for the web UI.
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-anthropic>=0.2.0
+langgraph>=0.2.60
+pydantic>=2.7.0
+pandas>=2.2.0
+numpy>=1.26.0
+matplotlib>=3.8.0
+python-dotenv>=1.0.1
+gradio>=5
