@@ -263,12 +263,12 @@ def test_timeout_after_price_keeps_only_verified_partial_evidence():
 
 def test_final_structured_output_timeout_is_recorded_without_unverified_report():
     model = DelayedSequenceModel(
-        responses=[(0.001, AIMessage(content=_final_json()))], structured_delay=0.05
+        responses=[(0.001, AIMessage(content=_final_json()))], structured_delay=0.2
     )
     agent = StockMindAgent(
         llm=model,
         tools=[],
-        config=AgentConfig(llm_timeout_seconds=0.01, run_timeout_seconds=1.0),
+        config=AgentConfig(llm_timeout_seconds=0.05, run_timeout_seconds=1.0),
     )
     state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
     assert state["status"] == "timeout"

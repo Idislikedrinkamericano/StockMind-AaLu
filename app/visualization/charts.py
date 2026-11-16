@@ -110,21 +110,23 @@ def render_price_chart(
 
     if len(closes) > 14:
         rsi = compute_rsi_series(closes)
-        ax_rsi.plot(x, rsi, color="purple", linewidth=1.0, label="RSI (14)")
-        ax_rsi.axhline(70, color="red", linestyle="--", linewidth=0.7)
-        ax_rsi.axhline(30, color="green", linestyle="--", linewidth=0.7)
-        ax_rsi.set_ylim(0, 100)
-        ax_rsi.legend(loc="upper left", fontsize=8)
+        if any(value is not None for value in rsi):
+            ax_rsi.plot(x, rsi, color="purple", linewidth=1.0, label="RSI (14)")
+            ax_rsi.axhline(70, color="red", linestyle="--", linewidth=0.7)
+            ax_rsi.axhline(30, color="green", linestyle="--", linewidth=0.7)
+            ax_rsi.set_ylim(0, 100)
+            ax_rsi.legend(loc="upper left", fontsize=8)
     ax_rsi.grid(alpha=0.25)
 
     if len(closes) >= 35:
         macd_line, signal_line, hist = compute_macd_series(closes)
-        colors = ["tab:green" if h >= 0 else "tab:red" for h in hist]
-        ax_macd.plot(x, macd_line, color="tab:blue", linewidth=1.0, label="MACD")
-        ax_macd.plot(x, signal_line, color="tab:orange", linewidth=1.0, label="Signal")
-        ax_macd.bar(x, hist, color=colors, alpha=0.5, label="Histogram")
-        ax_macd.axhline(0, color="black", linewidth=0.7)
-        ax_macd.legend(loc="upper left", fontsize=8)
+        if macd_line:
+            colors = ["tab:green" if h >= 0 else "tab:red" for h in hist]
+            ax_macd.plot(x, macd_line, color="tab:blue", linewidth=1.0, label="MACD")
+            ax_macd.plot(x, signal_line, color="tab:orange", linewidth=1.0, label="Signal")
+            ax_macd.bar(x, hist, color=colors, alpha=0.5, label="Histogram")
+            ax_macd.axhline(0, color="black", linewidth=0.7)
+            ax_macd.legend(loc="upper left", fontsize=8)
     ax_macd.grid(alpha=0.25)
 
     if len(dates) > 12:

@@ -1,319 +1,153 @@
 # StockMind
 
-A **ReAct-based stock research agent** built with LangGraph, LangChain, Pydantic
-and Python. The goal is not a stock chatbot, but an agent with a real runtime:
-autonomous tool selection, explicit state management, deterministic
-computation, observability and evaluation hooks.
+[简体中文](README.zh-CN.md)
 
-> Language: **English** | [简体中文](README.zh-CN.md)
+StockMind is a stock-research agent built with **LangChain**, **LangGraph**, and
+the **ReAct** pattern. It separates LLM reasoning from data retrieval and
+deterministic financial calculations, then produces structured research reports
+from provenance-aware observations.
 
-> **Current scope (Phase 1 + Phase 2):** the core ReAct loop, a full tool set
-> (market, financial, news, technical, valuation), state management, iteration
-> limits, tool error handling, structured final output, bilingual reports
-> (English / 简体中文), multi-ticker runs, basic tracing and unit tests.
-> Backtesting, portfolio optimisation and evaluation datasets are intentionally
-> deferred to later phases.
+> StockMind is an engineering project and research aid, not investment advice.
 
----
+## Project Overview
+
+StockMind uses an explicit LangGraph workflow rather than hiding the agent loop
+behind a prebuilt abstraction. State, tool observations, execution limits, and
+failures are therefore visible and testable.
+
+Final report facts and metrics are assembled only from valid tool observations.
+LLM prose or schema-valid JSON is not evidence on its own.
+
+## Features
+
+- ReAct-style workflow with bounded iterations, tool retries, and LLM, tool,
+  and whole-run timeouts.
+- Market, financial-statement, news, technical-analysis, and valuation tools.
+- Deterministic MA, RSI, MACD, volatility, drawdown, P/E, EV/EBITDA, FCF-yield,
+  and DCF calculations.
+- Structured `StockResearchReport` output in English or Simplified Chinese.
+- Explicit state, tracing, optional in-memory or SQLite checkpoints, and a
+  repeatable offline scripted demo.
+- Default deterministic **mock data**, clearly labelled as simulated; optional
+  yfinance and AkShare providers for real-data experiments.
 
 ## Architecture
 
+```text
+User request
+    │
+    ▼
+LangGraph ReAct workflow ──► LLM reasoning / tool selection
+    │                                  │
+    │                                  ▼
+    └────────────────────────── Tools and providers
+                                       │
+                                       ▼
+                         validated observations
+                                       │
+                                       ▼
+                    deterministic report assembler
+                                       │
+                                       ▼
+                        StockResearchReport
 ```
-User Query
-   │
-   ▼
-┌─────────────┐   tool_calls?   ┌──────────┐
-│    agent    │ ──────────────▶ │  tools   │
-│ (LLM reason)│ ◀────────────── │ (execute)│
-└─────────────┘    observation  └──────────┘
-   │ no more tool calls /
-   │ max iterations / error
-   ▼
-┌──────────────┐
-│   finalize   │ ──▶ StockResearchReport (Pydantic)
-└──────────────┘
-```
 
-The loop is implemented as a LangGraph `StateGraph` (not the prebuilt
-`create_react_agent`) so that state, iteration guards and error semantics are
-explicit and testable.
-
-### Responsibilities
-
-| Layer | Responsibility |
+| Component | Responsibility |
 | --- | --- |
-| LLM (`app/models`, `app/agents/prompts`) | Reasoning, tool selection, interpretation, summarisation |
-| Tools (`app/tools`) | Data retrieval + deterministic computation |
-| Analysis (`app/tools/analysis.py`) | Pure, side-effect-free financial/technical math |
-| Providers (`app/tools/providers.py`) | Raw data retrieval (mock + yfinance + akshare) |
-| Report assembly (`app/reporting`) | Deterministic, evidence-grounded report fallback |
-| LangGraph (`app/graph`) | State, control flow, iteration/termination logic |
-| Pydantic (`app/schemas`) | Structured data contracts |
-| Tracing (`app/observability`) | Run/step/tool observability |
+| `app/agents` and `app/models` | Agent façade, prompts, LLM providers, scripted demo model |
+| `app/graph` | LangGraph state, routing, deadlines, retries, and termination |
+| `app/tools` | Provider access and deterministic calculations |
+| `app/reporting` | Evidence-grounded report assembly and safe no-data output |
+| `app/schemas` | Pydantic contracts for reports and observations |
+| `app/observability` | Trace and cost-observation utilities |
 
-The LLM is **not** allowed to compute numbers (P/E, RSI, MACD, DCF, growth,
-volatility, drawdown, etc.). Those belong in tools, which call the pure
-functions in `app/tools/analysis.py`. Every tool result carries `source`,
-`timestamp` and `data_period` so the final report can distinguish observed data
-from interpretation.
+The LLM interprets available observations and requests tools. It does not own
+financial calculations, and a tool failure becomes unavailable data rather than
+a fabricated value.
 
----
+## Quick Start
 
-## Tools (Phase 2)
-
-| Category | Tools |
-| --- | --- |
-| Market | `get_stock_price`, `get_historical_prices` |
-| Financial | `get_income_statement`, `get_balance_sheet`, `get_cash_flow`, `get_eps`, `get_revenue` |
-| News | `search_company_news`, `search_market_news` |
-| Technical | `calculate_ma`, `calculate_rsi`, `calculate_macd`, `calculate_volatility`, `calculate_drawdown` |
-| Valuation | `calculate_pe`, `calculate_ev_ebitda`, `calculate_fcf_yield`, `calculate_dcf` |
-
----
-
-## Directory layout
-
-```
-app/
-├── utils.py                # time helpers
-├── agents/
-│   ├── react_agent.py      # StockMindAgent facade
-│   └── prompts.py          # language-aware prompts
-├── graph/
-│   ├── state.py            # StockAgentState (TypedDict)
-│   ├── workflow.py         # async LangGraph ReAct loop
-│   └── checkpoint.py       # memory + SQLite checkpointer
-├── models/
-│   ├── providers.py        # OpenAI / Anthropic abstraction
-│   └── demo.py             # offline scripted demo model
-├── reporting/
-│   └── assembler.py        # evidence-grounded report fallback
-├── evaluation/
-│   ├── evaluator.py        # Phase 4 evaluation framework
-│   └── datasets/questions.json
-├── tools/
-│   ├── base.py             # provenance + metric serialization
-│   ├── analysis.py         # pure deterministic computation
-│   ├── providers.py        # MarketDataProvider (mock + yfinance + akshare)
-│   ├── market.py           # price + historical tools
-│   ├── financial.py        # financial statement tools
-│   ├── news.py             # company + market news tools
-│   ├── technical.py        # technical indicator tools
-│   └── valuation.py        # valuation tools
-├── observability/
-│   ├── tracing.py          # TraceCollector
-│   └── cost.py             # token cost estimation
-├── schemas/
-│   └── report.py           # StockResearchReport
-└── visualization/
-    └── charts.py           # terminal sparkline + PNG charts
-tests/
-examples/
-    research.py             # multi-stock, bilingual CLI
-    nvda_research.py        # quick NVDA demo
-    async_research.py       # async + checkpoint resume demo
-promptlog/
-    __main__.py             # prompt journal CLI
-    journal.py              # storage + rendering
-    prompts.jsonl / prompts.md
-```
-
----
-
-## Setup
-
-Requires Python 3.11+.
+Requires Python 3.11 or newer.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # then fill in an API key if you have one
+cp .env.example .env
 ```
 
-Optional: real market data via yfinance.
+`mock` is the default data provider. It is deterministic and simulated, not
+live market data. To enable optional real-data providers, install their
+dependencies and set the provider in your local `.env`:
 
 ```bash
 pip install -e ".[real-data]"
+# STOCKMIND_DATA_PROVIDER=yfinance  # or akshare
 ```
 
----
+To use a real LLM agent, configure either `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY` in `.env` and select the provider/model as needed. Do not
+commit `.env`; it is ignored by Git.
 
-## Run the demo
-
-Quick NVDA demo:
+Run the offline test suite with:
 
 ```bash
-python examples/nvda_research.py --lang en
+python -m pytest
 ```
 
-Multi-stock, bilingual:
+## Example Usage
+
+### Scripted Demo (default without an API key)
 
 ```bash
 python examples/research.py --tickers NVDA,AMD,TSM --lang zh
+python examples/nvda_research.py --lang en
+```
+
+Without an LLM API key, these commands use `ScriptedReActDemoModel`. It runs a
+**fixed sequence** of tool calls for the supplied ticker so the workflow can be
+demonstrated offline. It is not autonomous and does not dynamically choose
+tools from the request. Its default results use simulated mock data.
+
+### Real LLM Agent
+
+```bash
 python examples/research.py --tickers AAPL --lang en
 ```
 
-* With `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` set, a real LLM drives each loop.
-* Without a key, an offline scripted demo model drives the loop through the full
-  tool set, for any ticker and language.
-* Data defaults to the deterministic `mock` provider, which is **clearly
-  labelled as simulated**. Set `STOCKMIND_DATA_PROVIDER=yfinance` (Yahoo) or
-  `STOCKMIND_DATA_PROVIDER=akshare` (Eastmoney, China-friendly, ~15 min delayed)
-  to fetch real data (requires network + optional dependency). akshare pulls US
-  price/history from Sina, financial statements from Eastmoney and valuation
-  from Baidu (best-effort parsing).
+When an OpenAI or Anthropic API key is available, `research.py` creates
+`StockMindAgent` with a real chat model. The model can request registered tools
+within the workflow's iteration and time limits. Data remains mock unless
+`STOCKMIND_DATA_PROVIDER` is changed.
 
-### Data-quality safeguards
+## Tech Stack
 
-AkShare historical rows with missing, NaN, or non-finite OHLC values are
-discarded; they are never converted to a synthetic price of zero. A real numeric
-zero is preserved as returned by the provider. If no valid bar or latest close
-is available, the tool returns an unavailable/error result instead of fabricated
-market data. For Eastmoney balance sheets, `total_debt` uses an explicitly
-reported total when present; otherwise it is calculated only when both explicit
-short-term and long-term interest-bearing debt components are available. Partial
-debt data and total liabilities are not substituted for total debt. Offline
-fixture tests cover these cases without calling external APIs.
+- Python 3.11+
+- LangChain Core and LangGraph
+- Pydantic
+- pandas, NumPy, and matplotlib
+- OpenAI or Anthropic integrations (optional)
+- yfinance or AkShare data providers (optional)
+- pytest
 
-Each report shows a **precise generation time** (`generated_at`, ISO 8601 with
-timezone), and a price/MA/volume/RSI/MACD **chart** with a dashed
-**linear-extrapolation trend** (labelled *not a prediction*) is saved to
-`charts/` (a terminal sparkline is also printed). The chart is generated with
-matplotlib.
+## Current Limitations
 
-## Run the tests
+- Default runs use simulated mock data; external providers are optional,
+  network-dependent, and subject to their source coverage and availability.
+- The Scripted Demo is intentionally fixed and is not LLM tool-selection
+  capability.
+- Real LLM output is bounded by timeouts and validated observations, but its
+  qualitative interpretation is not investment advice.
+- Missing, non-finite, or incomplete provider data can yield unavailable report
+  sections. StockMind does not synthesize missing prices, debt, or indicators.
+- This project does not provide trading execution, portfolio optimisation, or
+  historical backtesting.
 
-```bash
-pytest
-```
+## Documentation
 
----
-
-## Async & checkpointing
-
-The agent is async-first; sync `run`/`invoke` are thin wrappers over `arun`/
-`ainvoke`.
-
-```python
-import asyncio
-from app.agents.react_agent import StockMindAgent
-
-async def main():
-    agent = StockMindAgent()  # InMemorySaver by default
-    report = await agent.ainvoke("Analyze NVDA", ticker="NVDA", thread_id="run-1")
-    snapshot = await agent.aget_state("run-1")  # read persisted checkpoint
-
-asyncio.run(main())
-```
-
-SQLite persistence (resumable across processes):
-
-```python
-from app.graph.checkpoint import build_checkpointer
-
-async with build_checkpointer("sqlite", "checkpoints.sqlite") as saver:
-    agent = StockMindAgent(checkpointer=saver)
-    await agent.ainvoke("Analyze NVDA", ticker="NVDA", thread_id="run-1")
-    await agent.ainvoke("Follow-up?", ticker="NVDA", thread_id="run-1")  # resumes
-```
-
-Run the bundled demo:
-
-```bash
-python examples/async_research.py --ticker NVDA --lang en
-```
-
----
-
-## Evaluation
-
-Run the evaluation dataset and score the agent:
-
-```bash
-python examples/evaluate.py --lang en
-```
-
-It reports task success, tool-selection accuracy, data grounding, numerical
-accuracy, answer quality, average latency, tokens and estimated cost.
-
-```text
-EVALUATION REPORT
-Task Success Rate:      100%
-Tool Selection Accuracy:100%
-Data Grounding Rate:    100%
-Numerical Accuracy:     100%
-Answer Quality (avg):   100%
-Average Latency:        0.02s
-Average Tokens:         0
-Average Cost:           $0.000000
-```
-
----
-
-## Prompt journal
-
-A standalone prompt recorder lives in [`promptlog/`](promptlog/):
-
-```bash
-python -m promptlog add "your prompt" --tag finance
-python -m promptlog list --limit 20
-python -m promptlog export
-```
-
-See [promptlog/README.md](promptlog/README.md).
-
----
-
-## Configuration
-
-See [.env.example](.env.example). Key variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `STOCKMIND_LLM_PROVIDER` | `openai` | `openai` or `anthropic` |
-| `STOCKMIND_LLM_MODEL` | `gpt-4o-mini` | model name |
-| `STOCKMIND_DATA_PROVIDER` | `mock` | `mock`, `yfinance` or `akshare` |
-| `STOCKMIND_LANGUAGE` | `en` | `en` or `zh` |
-| `STOCKMIND_MAX_ITERATIONS` | `8` | ReAct iteration cap |
-| `STOCKMIND_TOOL_TIMEOUT_SECONDS` | `15` | per-tool timeout |
-| `STOCKMIND_TOOL_RETRIES` | `1` | retries after a tool failure |
-| `STOCKMIND_RETRY_BACKOFF_SECONDS` | `0.5` | initial backoff for tool retries |
-| `STOCKMIND_RETRY_MAX_BACKOFF_SECONDS` | `8` | max backoff for tool retries |
-| `STOCKMIND_RETRY_JITTER` | `0.1` | jitter fraction for backoff |
-| `STOCKMIND_TRACE_DIR` | *(empty)* | JSONL trace output directory |
-
-API keys are read from the environment by the underlying SDKs and are never
-stored in code.
-
----
-
-## Design notes
-
-* **State over globals** — every node returns partial `StockAgentState` updates;
-  `messages` uses LangGraph's `add_messages` reducer for correct accumulation.
-* **Data retrieval vs. computation** — providers fetch raw data; pure functions
-  in `analysis.py` do the math; tools compose the two. The LLM only interprets.
-* **Reliability guards** — `max_iterations`, per-tool timeout (`asyncio.wait_for`),
-  retry policy, duplicate-tool-call detection, and graceful degradation: a
-  failed tool becomes an error observation, never a crash.
-* **Structured output with fallback** — `finalize` prefers
-  `llm.with_structured_output(StockResearchReport)`, then JSON parsing, then a
-  deterministic evidence-grounded assembly from tool observations, so the
-  offline demo still quotes real numbers and sources.
-* **Precise timing** — every report carries `generated_at` (ISO 8601,
-  microsecond precision, with timezone).
-* **Bilingual** — `language` is part of the run config/state; prompts carry a
-  language directive while the structured-output schema stays stable.
-* **Provenance** — mock data is explicitly labelled; the system prompt forbids
-  fabrication and demands sources.
-
----
-
-## Roadmap
-
-- [x] **Phase 1** — ReAct loop + market/news tools.
-- [x] **Phase 2** — financial, technical, news and valuation tools.
-- [x] **Phase 3** — async execution, checkpointing, retries/backoff hardening.
-- [x] **Phase 4** — richer tracing, evaluation datasets, cost tracking.
-- [ ] **Phase 5** — historical evaluation / backtesting of signals.
+- [Engineering notes](docs/engineering-notes.md) — reliability, data integrity,
+  async/checkpoint, evaluation, and prompt-journal details.
+- [Configuration template](.env.example) — supported environment variables;
+  keep your populated `.env` local.
+- [Examples](examples/) — CLI and async/checkpoint demonstrations.
+- [Prompt journal](promptlog/README.md) — standalone prompt-recording utility.

@@ -46,6 +46,46 @@ def test_compute_drawdown():
     assert result["current_drawdown"] == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("invalid", [0.0, -1.0, float("nan"), float("inf")])
+def test_price_indicators_reject_zero_negative_and_non_finite_prices(invalid):
+    closes = [10.0] * 40
+    closes[30] = invalid
+    assert analysis.compute_ma(closes, window=20) is None
+    assert analysis.compute_rsi(closes, period=14) is None
+    assert analysis.compute_macd(closes) is None
+    assert analysis.compute_annualized_volatility(closes) is None
+    assert analysis.compute_drawdown(closes) is None
+    assert all(value is None for value in analysis.compute_rsi_series(closes, period=14))
+    assert analysis.compute_macd_series(closes) == ([], [], [])
+
+
+def test_price_indicators_reject_empty_and_insufficient_samples():
+    assert analysis.compute_ma([], window=3) is None
+    assert analysis.compute_rsi([], period=14) is None
+    assert analysis.compute_macd([]) is None
+    assert analysis.compute_annualized_volatility([]) is None
+    assert analysis.compute_drawdown([]) is None
+
+    one_price = [10.0]
+    assert analysis.compute_ma(one_price, window=2) is None
+    assert analysis.compute_rsi(one_price, period=14) is None
+    assert analysis.compute_macd(one_price) is None
+    assert analysis.compute_annualized_volatility(one_price) is None
+    assert analysis.compute_drawdown(one_price) == {
+        "max_drawdown": 0.0,
+        "current_drawdown": 0.0,
+    }
+
+
+def test_price_indicators_reject_an_all_zero_price_sequence():
+    closes = [0.0] * 40
+    assert analysis.compute_ma(closes, window=20) is None
+    assert analysis.compute_rsi(closes, period=14) is None
+    assert analysis.compute_macd(closes) is None
+    assert analysis.compute_annualized_volatility(closes) is None
+    assert analysis.compute_drawdown(closes) is None
+
+
 def test_project_linear_trend():
     projection = analysis.project_linear_trend([1.0, 2.0, 3.0, 4.0, 5.0], horizon=2)
     assert projection == [pytest.approx(6.0), pytest.approx(7.0)]
