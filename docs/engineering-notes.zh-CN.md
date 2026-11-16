@@ -98,6 +98,28 @@ FCFE 不请求也不扣减净债务。
 `cash_flow_basis`/`net_debt` 关键字参数；但旧调用未明确现金流性质时现在返回 `None`。
 该行为及年度 `eps_ttm` 返回 null，是对原有误导性语义的必要修正。
 
+## 依赖安装
+
+`pyproject.toml` 是依赖版本的统一来源，核心依赖保持不变。可选组分别为测试
+（`dev`：pytest）、持久化（`sqlite`：aiosqlite 和 langgraph-checkpoint-sqlite）、
+界面（`web`：Gradio）及金融数据源（`real-data`：yfinance 和 AkShare）。
+
+```bash
+pip install -e .                 # 仅核心功能
+pip install -e ".[dev,sqlite]"   # 完整离线测试与 checkpoint 示例
+pip install -e ".[web]"          # Gradio UI
+pip install -e ".[real-data]"    # 可选金融数据源
+```
+
+SQLite 最低版本 aiosqlite 0.22.1、langgraph-checkpoint-sqlite 3.1.3 与本次验证使用的
+现有环境一致。单独安装 `dev` 不会安装 SQLite，完整测试的安装命令显式选择两个组。
+`requirements.txt` 保留为仓库根目录下的部署安装入口，内容引用 `.[web]`，不重复维护
+包版本。使用该入口需要完整项目（包括 `pyproject.toml`），不能只复制 requirements 文件。
+
+Web UI 始终构造脚本模型，API Key 不改变模式。数据默认为 Mock，管理员的 Provider
+配置仍然生效，报告保留来源标记。真实 LLM 使用 `examples/research.py`，需匹配的
+Provider、模型和 API Key，Provider 可能收费。浏览器交互与外部托管需另行验证。
+
 ## 异步、Checkpoint 与追踪
 
 公共 API 以异步为优先（`ainvoke`/`arun`），并提供同步包装供简单脚本使用。默认
@@ -109,7 +131,10 @@ JSONL，否则 trace 仅保存在内存中。
 python examples/async_research.py --ticker NVDA --lang en
 ```
 
-内置异步示例使用 Scripted Demo 模型；它展示工作流与 checkpoint，而不是实时 LLM。
+内置异步示例显式使用 Mock 工具和 Scripted Demo 模型，即使配置了 API Key 或真实数据
+Provider 也是如此。每次调用创建全新的模型与 Agent，两次共享 SQLite saver 和 thread
+ID，从而避免复用耗尽的一次性迭代器，同时保留 checkpoint 消息。它展示两次成功的脚本化
+研究，不代表自主追问推理或从中断的图节点恢复。模型仍为一次性，正常错误处理保持不变。
 
 ## 评估与 Prompt 记录
 
@@ -151,3 +176,22 @@ P1-D 离线验证（Python 3.12.8，复用现有 `.venv`）：
 及未知期间、EPS 回退与零 EPS、正常估值比率、报告警示保留和离线 Provider 元数据。
 原有 DCF 冒烟测试调整为要求明确口径，或验证 mock FCF 返回不可用。未调用真实金融 API
 或付费 LLM。
+
+Cleanup-B 离线验证（2026-11-16，复用现有 Python 3.12.8 环境；未安装或升级依赖）：
+
+- `.venv/bin/python -m pytest tests/test_cleanup_b.py -v`：**6 passed**。
+- `.venv/bin/python -m pytest -v`：**139 passed、0 failed、0 skipped**。
+  一条警告涉及沙箱内 pytest 缓存写入权限。
+- `.venv/bin/python -m compileall -q app tests examples web`：允许写入字节码后通过；
+  首次尝试受到沙箱权限限制。
+- `git diff --check`：通过。
+
+新增六个用例验证 SQLite 导入及后端操作、AMD/英文与 NVDA/中文各两次完整脚本运行
+（每次 15 次工具调用、无错误、共享 checkpoint 历史）、模型的一次性耗尽错误，以及
+中英文 Web 文案。异步测试明确阻止选择外部数据/LLM Provider；Web 文案通过静态检查
+验证，没有导入或启动 Gradio。
+
+依赖声明已解析，并与环境中已安装的核心、开发及 SQLite 版本核对；pip 已解析本地
+`.[web]` requirements 入口。这不是全新环境安装或部署测试。环境缺少 Gradio、
+yfinance 和 AkShare，未验证浏览器交互或真实 Provider 集成。Provider 测试均使用
+离线 fixture/stub，未调用真实金融 API 或付费 LLM。

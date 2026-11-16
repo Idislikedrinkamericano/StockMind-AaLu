@@ -72,9 +72,14 @@ Requires Python 3.11 or newer.
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,sqlite]"
 cp .env.example .env
 ```
+
+This installs the core package, test tools, and SQLite checkpoint support for
+the full test suite. For core-only use, run `pip install -e .`. Optional groups
+are `dev` (tests), `sqlite` (persistent checkpoints), `web` (Gradio), and
+`real-data` (financial providers), all declared in `pyproject.toml`.
 
 `mock` is the default data provider. It is deterministic and simulated, not
 live market data. To enable optional real-data providers, install their
@@ -85,9 +90,9 @@ pip install -e ".[real-data]"
 # STOCKMIND_DATA_PROVIDER=yfinance  # or akshare
 ```
 
-To use a real LLM agent, configure either `OPENAI_API_KEY` or
-`ANTHROPIC_API_KEY` in `.env` and select the provider/model as needed. Do not
-commit `.env`; it is ignored by Git.
+To use a real LLM agent, set `STOCKMIND_LLM_PROVIDER` to `openai` or `anthropic`,
+provide that provider's API key, and choose a matching `STOCKMIND_LLM_MODEL` in
+`.env`. Provider charges may apply. Do not commit `.env`; it is ignored by Git.
 
 Run the offline test suite with:
 
@@ -119,6 +124,29 @@ When an OpenAI or Anthropic API key is available, `research.py` creates
 `StockMindAgent` with a real chat model. The model can request registered tools
 within the workflow's iteration and time limits. Data remains mock unless
 `STOCKMIND_DATA_PROVIDER` is changed.
+
+### Async Checkpoint Demo
+
+```bash
+python examples/async_research.py --ticker AMD --lang en
+```
+
+Requires the `sqlite` extra. Runs two fresh Scripted Demo sequences with explicit
+Mock tools and a shared SQLite thread. It preserves checkpoint messages; it does
+not demonstrate autonomous follow-up reasoning or interrupted-run resume.
+
+### Scripted Web Demo
+
+```bash
+pip install -e ".[web]"
+python app.py
+```
+
+Open `http://127.0.0.1:7860`. The Web UI uses a fixed tool sequence with Mock data
+by default. It has no real LLM mode switch; adding an API key does not enable one.
+Use the research CLI above for a real LLM agent. Platforms requiring a
+requirements file can run `pip install -r requirements.txt` from the repository
+root; that file delegates to `.[web]`.
 
 ## Tech Stack
 

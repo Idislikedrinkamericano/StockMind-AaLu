@@ -67,9 +67,13 @@ LLM 负责解读可用观测结果和请求工具，不负责金融计算。工�
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,sqlite]"
 cp .env.example .env
 ```
+
+该命令安装核心包、测试工具和完整测试套件所需的 SQLite checkpoint 支持。仅使用核心
+功能可执行 `pip install -e .`。可选组为 `dev`（测试）、`sqlite`（持久化 checkpoint）、
+`web`（Gradio）和 `real-data`（金融数据源），均在 `pyproject.toml` 中声明。
 
 默认数据源是 `mock`。它是确定性的模拟数据，并非实时行情。如需启用可选的真实数据源，
 安装其依赖并在本地 `.env` 中设置数据源：
@@ -79,8 +83,9 @@ pip install -e ".[real-data]"
 # STOCKMIND_DATA_PROVIDER=yfinance  # 或 akshare
 ```
 
-如需使用真实 LLM Agent，请在 `.env` 中配置 `OPENAI_API_KEY` 或
-`ANTHROPIC_API_KEY`，并按需选择 Provider/模型。请勿提交 `.env`；Git 已忽略它。
+如需使用真实 LLM Agent，请在 `.env` 中将 `STOCKMIND_LLM_PROVIDER` 设为 `openai`
+或 `anthropic`，配置对应 Provider 的 API Key 和匹配的 `STOCKMIND_LLM_MODEL`。
+Provider 可能收费。请勿提交 `.env`；Git 已忽略它。
 
 运行离线测试套件：
 
@@ -110,6 +115,27 @@ python examples/research.py --tickers AAPL --lang en
 当 OpenAI 或 Anthropic API Key 可用时，`research.py` 会使用真实聊天模型创建
 `StockMindAgent`。模型可以在工作流的迭代和时间限制内请求已注册工具。除非更改
 `STOCKMIND_DATA_PROVIDER`，数据仍默认为 mock。
+
+### 异步 Checkpoint 演示
+
+```bash
+python examples/async_research.py --ticker AMD --lang en
+```
+
+需要 `sqlite` 可选依赖。两次调用各自使用全新的 Scripted Demo 序列和显式 Mock 工具，
+共享一个 SQLite thread。它保留 checkpoint 消息，不代表自主追问推理或中断任务恢复。
+
+### 脚本化 Web 演示
+
+```bash
+pip install -e ".[web]"
+python app.py
+```
+
+打开 `http://127.0.0.1:7860`。Web UI 使用固定工具序列，数据默认为 Mock。页面没有
+真实 LLM 模式切换入口，设置 API Key 也不会启用；真实 LLM Agent 请使用上面的研究 CLI。
+需要 requirements 文件的平台可在仓库根目录执行 `pip install -r requirements.txt`；
+该文件统一引用 `.[web]`。
 
 ## 技术栈
 

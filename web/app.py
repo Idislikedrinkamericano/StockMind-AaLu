@@ -38,12 +38,25 @@ SECTION_TITLES_EN = {
 }
 
 DISCLAIMER_ZH = (
-    "> ⚠️ 本演示使用**模拟数据**（simulated），仅用于展示 StockMind Agent 的研究流程，"
-    "不构成任何投资建议。"
+    "> ⚠️ 当前为 **Scripted Demo**，使用固定工具序列，不根据问题自主选择工具。"
+    "数据默认来自 **Mock 模拟数据**，并非实时行情；若管理员更改 Provider，以报告来源为准。"
+    "本页面没有真实 LLM 模式入口，设置 API Key 不会切换模式。不构成投资建议。"
 )
 DISCLAIMER_EN = (
-    "> ⚠️ This demo uses **simulated data** to showcase the StockMind agent workflow. "
-    "Not investment advice."
+    "> ⚠️ This is a **Scripted Demo** with a fixed tool sequence, not autonomous tool selection. "
+    "Data defaults to **Mock simulated data**, not live quotes; check report sources if the administrator changes the provider. "
+    "This page has no real LLM mode; adding an API key does not switch modes. Not investment advice."
+)
+
+DEMO_DESCRIPTION = (
+    "# 📈 StockMind — 股票研究流程演示 / Scripted Demo\n\n"
+    "通过 LangGraph 执行固定工具序列，再根据工具观测生成报告。\n\n"
+    "Runs a fixed tool sequence through LangGraph and assembles reports from tool observations.\n\n"
+    + DISCLAIMER_ZH + "\n\n" + DISCLAIMER_EN + "\n\n"
+    "真实 LLM Agent 请使用 `python examples/research.py`，配置所选 Provider 的 API Key、"
+    "`STOCKMIND_LLM_PROVIDER` 和相应模型；可能产生 Provider 费用。数据仍默认 Mock。\n\n"
+    "For the real LLM agent, use `python examples/research.py` with the selected provider's API key, "
+    "`STOCKMIND_LLM_PROVIDER`, and a matching model. Provider charges may apply; data still defaults to Mock."
 )
 
 
@@ -226,10 +239,8 @@ async def run_research(ticker, lang, max_iter):
     yield "\n".join(log[-40:]), report_md, metrics_md, chart_path
 
 
-with gr.Blocks(title="StockMind — AI Stock Research Agent") as demo:
-    gr.Markdown("# 📈 StockMind — AI 股票研究智能体\n"
-                "ReAct agent（LangGraph）自主调用 18 个金融工具，生成证据驱动的研究报告。\n\n"
-                "> ⚠️ 演示使用**模拟数据**，仅展示 agent 工作流，不构成投资建议。")
+with gr.Blocks(title="StockMind — Scripted Research Demo") as demo:
+    gr.Markdown(DEMO_DESCRIPTION)
     with gr.Row():
         ticker_in = gr.Textbox(label="Ticker 股票代码", value="NVDA", max_lines=1)
         lang_in = gr.Radio(choices=[("中文", "zh"), ("English", "en")],

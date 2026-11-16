@@ -126,6 +126,33 @@ numeric function adds optional `cash_flow_basis`/`net_debt` keywords, but legacy
 calls without a confirmed basis now return `None`. This and null annual
 `eps_ttm` are intentional corrections to previously misleading semantics.
 
+## Dependency Installation
+
+`pyproject.toml` is the source of dependency versions. Core dependencies remain
+unchanged. Extras separate tests (`dev`: pytest), persistence (`sqlite`:
+aiosqlite and langgraph-checkpoint-sqlite), UI (`web`: Gradio), and financial
+providers (`real-data`: yfinance and AkShare).
+
+```bash
+pip install -e .                 # core only
+pip install -e ".[dev,sqlite]"   # full offline test suite and checkpoint example
+pip install -e ".[web]"          # Gradio UI
+pip install -e ".[real-data]"    # optional financial providers
+```
+
+The SQLite minimum versions, aiosqlite 0.22.1 and langgraph-checkpoint-sqlite
+3.1.3, match the existing environment used for validation. The `dev` extra alone
+does not install SQLite; full-suite setup explicitly selects both groups.
+`requirements.txt` remains a repository-root deployment entry point containing
+`.[web]`, without duplicated package versions. It requires the complete project,
+including `pyproject.toml`; it is not a standalone dependency manifest.
+
+The Web UI always constructs the scripted model. API keys do not change its mode.
+It defaults to Mock data, but administrator provider settings still apply;
+reports retain source labels. Real LLM usage is through `examples/research.py`
+with a matching provider, model, and API key. Provider fees may apply. Browser
+interaction and external hosting require separate validation.
+
 ## Async, Checkpoints, and Tracing
 
 The public API is async-first (`ainvoke`/`arun`), with sync wrappers for simple
@@ -137,8 +164,13 @@ memory unless `STOCKMIND_TRACE_DIR` enables JSONL output.
 python examples/async_research.py --ticker NVDA --lang en
 ```
 
-The bundled async example uses the Scripted Demo model. It demonstrates the
-workflow and checkpointing, not a live LLM.
+The bundled async example explicitly uses Mock tools and a Scripted Demo model,
+even when API keys or real-data provider settings are present. Each invocation
+gets a fresh model and Agent; both share the SQLite saver and thread ID. This
+avoids reusing an exhausted one-shot iterator while retaining checkpoint messages.
+It demonstrates two successful scripted research runs, not autonomous follow-up
+reasoning or resumption from an interrupted graph node. The model itself remains
+one-shot and normal error handling is unchanged.
 
 ## Evaluation and Prompt Journal
 
@@ -185,3 +217,26 @@ and numeric boundaries, annual/TTM and unknown periods, EPS fallback and zero
 EPS, normal ratios, retained report warnings, and offline provider metadata.
 Existing DCF smoke tests were updated to require explicit semantics or expect
 unavailable for mock FCF. No real financial API or paid LLM was called.
+
+Cleanup-B offline validation (2026-11-16, existing Python 3.12.8 environment;
+no packages installed or upgraded):
+
+- `.venv/bin/python -m pytest tests/test_cleanup_b.py -v`: **6 passed**.
+- `.venv/bin/python -m pytest -v`: **139 passed, 0 failed, 0 skipped**.
+  One warning concerned sandbox permissions for the pytest cache.
+- `.venv/bin/python -m compileall -q app tests examples web`: passed after
+  permission was granted to write bytecode; the first attempt hit sandbox limits.
+- `git diff --check`: passed.
+
+The six new cases check SQLite imports and backend operation, two complete
+scripted runs for AMD/English and NVDA/Chinese (15 tool calls per run, no errors,
+shared checkpoint history), the model's one-shot error, and bilingual Web copy.
+The async tests explicitly reject attempts to select an external data/LLM
+provider. Web copy is checked statically without importing or starting Gradio.
+
+Dependency declarations were parsed and checked against installed core, dev,
+and SQLite versions; pip parsed the local `.[web]` requirements entry. This is
+not a fresh-install or deployment test. Gradio, yfinance, and AkShare are absent;
+browser interaction and real-provider integration were not exercised. All
+provider tests use offline fixtures/stubs; no real financial API or paid LLM
+was called.
