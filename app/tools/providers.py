@@ -44,6 +44,7 @@ class StockPriceResult(BaseModel):
     source: str
     timestamp: datetime
     data_period: str | None = Field(default=None)
+    as_of: str | None = None
     note: str | None = Field(default=None)
 
 
@@ -84,9 +85,18 @@ class NewsResult(BaseModel):
     note: str | None = Field(default=None)
 
 
-class IncomeStatement(BaseModel):
+class FinancialMetadata(BaseModel):
+    """Source periods, never inferred from retrieval time; overrides are per field."""
+
+    period: str = "unknown"
+    period_end: str | None = None
+    published_at: str | None = None
+    source_updated_at: str | None = None
+    field_metadata: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class IncomeStatement(FinancialMetadata):
     ticker: str
-    period: str = Field(default="TTM")
     revenue: float | None = None
     gross_profit: float | None = None
     operating_income: float | None = None
@@ -98,7 +108,7 @@ class IncomeStatement(BaseModel):
     note: str | None = None
 
 
-class BalanceSheet(BaseModel):
+class BalanceSheet(FinancialMetadata):
     ticker: str
     total_assets: float | None = None
     total_liabilities: float | None = None
@@ -110,21 +120,23 @@ class BalanceSheet(BaseModel):
     note: str | None = None
 
 
-class CashFlow(BaseModel):
+class CashFlow(FinancialMetadata):
     ticker: str
     operating_cash_flow: float | None = None
     investing_cash_flow: float | None = None
     financing_cash_flow: float | None = None
     free_cash_flow: float | None = None
+    cash_flow_basis: str = "unknown"
     source: str
     timestamp: datetime
     note: str | None = None
 
 
-class KeyStats(BaseModel):
+class KeyStats(FinancialMetadata):
     ticker: str
     eps_ttm: float | None = None
     shares_outstanding: float | None = None
+    shares_basis: str = "unknown"
     market_cap: float | None = None
     beta: float | None = None
     source: str
@@ -391,6 +403,7 @@ class MockMarketDataProvider(MarketDataProvider):
         f = self._financials(symbol)
         return CashFlow(
             ticker=symbol,
+            period="TTM",
             operating_cash_flow=f["operating_cash_flow"],
             investing_cash_flow=f["investing_cash_flow"],
             financing_cash_flow=f["financing_cash_flow"],
@@ -405,6 +418,8 @@ class MockMarketDataProvider(MarketDataProvider):
         f = self._financials(symbol)
         return KeyStats(
             ticker=symbol,
+            shares_basis="simulated_outstanding",
+            field_metadata={"eps_ttm": {"period": "TTM"}},
             eps_ttm=f["eps_ttm"],
             shares_outstanding=f["shares_outstanding"],
             market_cap=f["market_cap"],
@@ -552,13 +567,14 @@ class YFinanceMarketDataProvider(MarketDataProvider):
         info = self._info(symbol)
         return IncomeStatement(
             ticker=symbol,
-            period="TTM",
+            period="unknown",
+            field_metadata={"eps_diluted": {"period": "TTM"}},
             revenue=_as_float(info.get("totalRevenue")),
             gross_profit=_as_float(info.get("grossProfits")),
             operating_income=_as_float(info.get("operatingIncome")),
             ebitda=_as_float(info.get("ebitda")),
             net_income=_as_float(info.get("netIncomeToCommon")),
-            eps_diluted=_as_float(info.get("trailingEps") or info.get("dilutedEPSTtm")),
+            eps_diluted=_as_float(info.get("trailingEps") if info.get("trailingEps") is not None else info.get("dilutedEPSTtm")),
             source=self.SOURCE,
             timestamp=utc_now(),
         )
@@ -595,6 +611,8 @@ class YFinanceMarketDataProvider(MarketDataProvider):
         info = self._info(symbol)
         return KeyStats(
             ticker=symbol,
+            shares_basis="reported_outstanding",
+            field_metadata={"eps_ttm": {"period": "TTM"}},
             eps_ttm=_as_float(info.get("trailingEps")),
             shares_outstanding=_as_float(info.get("sharesOutstanding")),
             market_cap=_as_float(info.get("marketCap")),
@@ -656,6 +674,7 @@ class AkShareMarketDataProvider(MarketDataProvider):
             source=self.SOURCE,
             timestamp=utc_now(),
             data_period="latest daily close",
+            as_of=str(df.iloc[-1]["date"]) if "date" in df.columns else None,
             note=self.NOTE,
         )
 
@@ -707,19 +726,29 @@ class AkShareMarketDataProvider(MarketDataProvider):
             note=note,
         )
 
-    def _report_map(self, ticker: str, statement: str) -> dict[str, float | None]:
+    def _report_data(self, ticker: str, statement: str) -> tuple[dict[str, float | None], dict[str, Any]]:
         """Latest annual report as ``{ITEM_NAME: AMOUNT}`` (best-effort)."""
         try:
             df = self._ak().stock_financial_us_report_em(
                 stock=ticker.upper().strip(), symbol=statement, indicator="年报"
             )
         except Exception:
-            return {}
+            return {}, {}
         if df is None or getattr(df, "empty", True):
-            return {}
+            return {}, {}
+        if "REPORT_DATE" not in df or df["REPORT_DATE"].dropna().empty:
+            return {}, {}
         latest = df["REPORT_DATE"].max()
         sub = df[df["REPORT_DATE"] == latest]
-        return {str(row["ITEM_NAME"]): _as_float(row["AMOUNT"]) for _, row in sub.iterrows()}
+        metadata = {"period": "annual", "period_end": str(latest)}
+        if "NOTICE_DATE" in sub:
+            dates = sub["NOTICE_DATE"].dropna().unique()
+            if len(dates) == 1:
+                metadata["published_at"] = str(dates[0])
+        return (
+            {str(row["ITEM_NAME"]): _as_float(row["AMOUNT"]) for _, row in sub.iterrows()},
+            metadata,
+        )
 
     @staticmethod
     def _find(items: dict[str, float | None], *keywords: str) -> float | None:
@@ -753,74 +782,85 @@ class AkShareMarketDataProvider(MarketDataProvider):
             return None
         return short_term + long_term
 
-    def _valuation_latest(self, ticker: str, indicator: str) -> float | None:
+    def _valuation_point(self, ticker: str, indicator: str) -> tuple[float | None, str | None]:
         try:
             df = self._ak().stock_us_valuation_baidu(
                 symbol=ticker.upper().strip(), indicator=indicator, period="近一年"
             )
             if df is not None and not getattr(df, "empty", True):
-                return _as_float(df["value"].iloc[-1])
+                date = df.iloc[-1].get("date")
+                return _as_float(df["value"].iloc[-1]), str(date) if date is not None else None
         except Exception:
-            return None
-        return None
+            return None, None
+        return None, None
 
     def get_key_stats(self, ticker: str) -> KeyStats:
         symbol = ticker.upper().strip()
-        price = self.get_stock_price(symbol).price
-        market_cap = self._valuation_latest(symbol, "总市值")
-        pe = self._valuation_latest(symbol, "市盈率(TTM)")
+        quote = self.get_stock_price(symbol)
+        price = quote.price
+        market_cap, cap_date = self._valuation_point(symbol, "总市值")
+        pe, pe_date = self._valuation_point(symbol, "市盈率(TTM)")
         eps = round(price / pe, 2) if (price and pe and pe > 0) else None
         shares = round(market_cap / price, 0) if (market_cap and price) else None
         return KeyStats(
             ticker=symbol,
+            shares_basis="derived_market_cap_over_price",
+            field_metadata={
+                "market_cap": {"source": "akshare/baidu", "period": "instant", "period_end": cap_date},
+                "eps_ttm": {"period": "TTM", "note": "Derived from Sina price / Baidu TTM P/E; alignment unverified.",
+                            "input_dates": {"price": quote.as_of, "pe": pe_date}},
+                "shares_outstanding": {"note": "Derived from market cap / price; not reported share count.",
+                                       "input_dates": {"price": quote.as_of, "market_cap": cap_date}},
+            },
             eps_ttm=eps,
             shares_outstanding=shares,
             market_cap=market_cap,
             beta=None,
-            source=self.SOURCE,
+            source="akshare/baidu + akshare/sina",
             timestamp=utc_now(),
             note="Market cap / PE via Baidu; EPS/shares derived from price.",
         )
 
     def get_income_statement(self, ticker: str) -> IncomeStatement:
         symbol = ticker.upper().strip()
-        items = self._report_map(symbol, "综合损益表")
+        items, metadata = self._report_data(symbol, "综合损益表")
         return IncomeStatement(
             ticker=symbol,
-            period="annual",
+            **metadata,
             revenue=self._find(items, "营业总收入", "营业收入", "总收入"),
             gross_profit=self._find(items, "毛利"),
             operating_income=self._find(items, "营业利润"),
             ebitda=self._find(items, "EBITDA", "息税折旧摊销前利润"),
             net_income=self._find(items, "归母净利润", "净利润"),
             eps_diluted=self._find(items, "稀释每股收益", "基本每股收益", "每股收益"),
-            source=self.SOURCE,
+            source="akshare/eastmoney",
             timestamp=utc_now(),
             note="Parsed from Eastmoney income statement (latest annual, best-effort).",
         )
 
     def get_balance_sheet(self, ticker: str) -> BalanceSheet:
         symbol = ticker.upper().strip()
-        items = self._report_map(symbol, "资产负债表")
+        items, metadata = self._report_data(symbol, "资产负债表")
         total_debt = self._total_debt(items)
         note = "Parsed from Eastmoney balance sheet (latest annual, best-effort)."
         if items and total_debt is None:
             note += " Total debt unavailable: no reported total or complete short-/long-term debt components."
         return BalanceSheet(
             ticker=symbol,
+            **{**metadata, "period": "instant" if metadata else "unknown"},
             total_assets=self._find(items, "资产总计", "资产合计"),
             total_liabilities=self._find(items, "负债合计", "负债总计"),
             total_debt=total_debt,
             cash_and_equivalents=self._find(items, "现金及现金等价物", "货币资金"),
             total_equity=self._find(items, "股东权益合计", "所有者权益合计"),
-            source=self.SOURCE,
+            source="akshare/eastmoney",
             timestamp=utc_now(),
             note=note,
         )
 
     def get_cash_flow(self, ticker: str) -> CashFlow:
         symbol = ticker.upper().strip()
-        items = self._report_map(symbol, "现金流量表")
+        items, metadata = self._report_data(symbol, "现金流量表")
         ocf = self._find(items, "经营活动产生的现金流量净额", "经营活动现金流量净额")
         capex = self._find(items, "购建固定资产", "资本支出")
         investing = self._find(items, "投资活动产生的现金流量净额", "投资活动现金流量净额")
@@ -830,11 +870,12 @@ class AkShareMarketDataProvider(MarketDataProvider):
             fcf = ocf - abs(capex)
         return CashFlow(
             ticker=symbol,
+            **metadata,
             operating_cash_flow=ocf,
             investing_cash_flow=investing,
             financing_cash_flow=financing,
             free_cash_flow=fcf,
-            source=self.SOURCE,
+            source="akshare/eastmoney",
             timestamp=utc_now(),
             note="Parsed from Eastmoney cash flow statement (latest annual, best-effort).",
         )

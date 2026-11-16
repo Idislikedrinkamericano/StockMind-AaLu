@@ -1,9 +1,8 @@
 """Deterministic, evidence-grounded report assembly.
 
-When the LLM's structured output is unavailable (e.g. the offline demo), the
-agent still has a full set of tool observations. This module turns those
-observations into a substantive :class:`StockResearchReport` that quotes actual
-numbers, cites each source and timestamp, and never fabricates.
+The workflow uses this assembler for final reports even when a structured LLM
+candidate is available. Reports use valid tool observations and disclose missing
+evidence; with no usable observations, the workflow supplies a no-data report.
 """
 
 from __future__ import annotations
@@ -180,6 +179,21 @@ def build_grounded_report(state: dict[str, Any], language: str = "en") -> StockR
     uncertainty = [
         "This report was assembled deterministically from valid tool observations; unsupported LLM claims were not used."
     ]
+    # Preserve financial semantics through the deterministic final-report path.
+    key_metrics["financial_metadata"] = {
+        name: {key: payload.get(key) for key in
+               ("source", "timestamp", "period", "period_end", "published_at", "source_updated_at", "field_metadata")}
+        for name, payload in (("income", income), ("balance", balance), ("cashflow", cashflow)) if payload
+    }
+    key_metrics["valuation_metadata"] = {
+        name: {key: payload.get(key) for key in ("data_period", "period_status", "input_provenance", "note")}
+        for name, payload in (("pe", pe), ("ev_ebitda", ev_ebitda), ("fcf_yield", fcf_yield), ("dcf", dcf)) if payload
+    }
+    for name, metadata in key_metrics["valuation_metadata"].items():
+        if metadata.get("note"):
+            uncertainty.append(f"{name}: {metadata['note']}")
+    for name, metadata in key_metrics["financial_metadata"].items():
+        uncertainty.append(f"{name} period: {metadata.get('period') or 'unknown'}, ending {metadata.get('period_end') or 'unknown'}; publication: {metadata.get('published_at') or 'unavailable'}.")
     if any(source == "mock" or "mock" in source.lower() for source in sources):
         uncertainty.append("The available data source is mock/simulated and must not be treated as real market data.")
     if dcf_v:

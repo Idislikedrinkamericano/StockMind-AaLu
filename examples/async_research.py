@@ -1,11 +1,12 @@
-"""Async + checkpointing demo (Phase 3).
+"""Async invocation and SQLite checkpoint demo.
 
 Run:
 
     python examples/async_research.py --ticker NVDA --lang en
 
-Demonstrates ``ainvoke``, SQLite checkpointing and resuming a run by
-``thread_id``. Without an API key it uses the offline scripted demo model.
+Demonstrates ``ainvoke`` and checkpoint access using a shared ``thread_id``.
+Always uses a one-shot scripted demo model, regardless of API keys. The second
+invocation reuses the exhausted script; it is not a fresh research sequence.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ async def main() -> None:
         snapshot = await agent.aget_state(thread_id)
         print(f"[checkpoint] status={snapshot.values['status']}  messages={len(snapshot.values['messages'])}")
 
-        follow_up = await agent.ainvoke(
+        await agent.ainvoke(
             f"Anything else worth flagging for {ticker}?", ticker=ticker, thread_id=thread_id
         )
         snapshot2 = await agent.aget_state(thread_id)

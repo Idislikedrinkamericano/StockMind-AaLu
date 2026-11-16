@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """StockMind Web — Gradio demo UI.
 
-Additive layer on top of the existing StockMind codebase (app/* untouched).
-Runs the agent with the offline scripted demo model + mock data provider,
-so the public demo needs no API keys and costs nothing.
-
-Layout of the deliverable (dropped into the repo root):
-    app.py                  <- thin launcher (this file's `demo`)
-    web/__init__.py
-    web/app.py              <- this file
-    requirements.txt        <- original deps + gradio
-    DEPLOY.md               <- deployment instructions
+Runs the agent with the scripted demo model and the configured data provider
+(mock by default). The model uses a fixed tool sequence, with no LLM API calls.
+The repository-root app.py launches this module's Gradio app.
 """
 import asyncio
 import json
@@ -182,7 +175,6 @@ async def run_research(ticker, lang, max_iter):
     """Async generator handler: streams progress, then yields final outputs."""
     zh = lang == "zh"
     ticker = (ticker or "").strip().upper()
-    empty = ("", "", None)
     if not ticker:
         msg = "请输入 ticker，例如 NVDA" if zh else "Please enter a ticker, e.g. NVDA"
         yield msg, "", "", None

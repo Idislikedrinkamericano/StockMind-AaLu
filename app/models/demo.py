@@ -1,10 +1,9 @@
 """Offline demo model.
 
 ``ScriptedReActDemoModel`` emulates the LLM side of a ReAct loop with a fixed
-sequence of tool calls. Its final message is a marker that tells the graph to
-assemble a grounded report from the *actual* tool observations (see
-``app/reporting/assembler.py``), so the offline demo still quotes real numbers
-and sources instead of canned prose.
+sequence of tool calls. A final marker ends the scripted sequence. The graph's
+finalizer always builds the report from valid tool observations through
+``app/reporting/assembler.py``; mock observations remain simulated data.
 """
 
 from __future__ import annotations

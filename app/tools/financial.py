@@ -3,11 +3,41 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
 from app.tools.providers import MarketDataProvider
+
+
+def financial_provenance(record: BaseModel, field: str) -> dict[str, Any]:
+    """Keep retrieval time separate from fiscal period and publication date."""
+    result = {
+        "field": field,
+        "source": getattr(record, "source", None) or "unavailable",
+        "timestamp": record.timestamp.isoformat() if getattr(record, "timestamp", None) else "unavailable",
+        "period": getattr(record, "period", None) or ("instant" if field == "price" else "unknown"),
+        "period_end": getattr(record, "period_end", None) or getattr(record, "as_of", None) or "unknown",
+        "published_at": getattr(record, "published_at", None) or "unavailable",
+        "source_updated_at": getattr(record, "source_updated_at", None) or "unavailable",
+        "note": getattr(record, "note", None),
+    }
+    result.update(getattr(record, "field_metadata", {}).get(field, {}))
+    for name, missing in (("source", "unavailable"), ("timestamp", "unavailable"),
+                          ("period", "unknown"), ("period_end", "unknown"), ("published_at", "unavailable"),
+                          ("source_updated_at", "unavailable")):
+        result[name] = result.get(name) or missing
+    return result
+
+
+def select_eps(provider: MarketDataProvider, ticker: str) -> tuple[float | None, dict[str, Any]]:
+    """Select on absence, not truthiness; use the provenance of the chosen field."""
+    stats = provider.get_key_stats(ticker)
+    if stats.eps_ttm is not None:
+        return stats.eps_ttm, financial_provenance(stats, "eps_ttm")
+    income = provider.get_income_statement(ticker)
+    return income.eps_diluted, financial_provenance(income, "eps_diluted")
 
 
 class TickerInput(BaseModel):
@@ -28,31 +58,28 @@ def build_financial_tools(provider: MarketDataProvider) -> list[BaseTool]:
         return provider.get_cash_flow(ticker).model_dump_json()
 
     def get_eps(ticker: str) -> str:
-        """Get trailing earnings per share (EPS)."""
-        stats = provider.get_key_stats(ticker)
-        income = provider.get_income_statement(ticker)
-        eps = stats.eps_ttm or income.eps_diluted
+        """Get available EPS, retaining its actual period and source."""
+        eps, provenance = select_eps(provider, ticker)
         return json.dumps(
             {
                 "ticker": ticker.upper(),
-                "eps_ttm": eps,
-                "source": stats.source,
-                "timestamp": stats.timestamp.isoformat(),
-                "note": stats.note,
+                "eps": eps,
+                "eps_ttm": eps if provenance["period"] == "TTM" else None,
+                **provenance,
+                "data_period": provenance["period"],
+                "status": "available" if eps is not None else "unavailable",
             }
         )
 
     def get_revenue(ticker: str) -> str:
-        """Get trailing twelve-month revenue."""
+        """Get reported revenue without relabelling annual or unknown data as TTM."""
         income = provider.get_income_statement(ticker)
         return json.dumps(
             {
                 "ticker": ticker.upper(),
                 "revenue": income.revenue,
-                "period": income.period,
-                "source": income.source,
-                "timestamp": income.timestamp.isoformat(),
-                "note": income.note,
+                **financial_provenance(income, "revenue"),
+                "data_period": financial_provenance(income, "revenue")["period"],
             }
         )
 
@@ -60,8 +87,8 @@ def build_financial_tools(provider: MarketDataProvider) -> list[BaseTool]:
         "get_income_statement": "Get the latest income statement for a ticker (revenue, gross profit, operating income, EBITDA, net income, EPS).",
         "get_balance_sheet": "Get the latest balance sheet for a ticker (total assets, liabilities, debt, cash, equity).",
         "get_cash_flow": "Get the latest cash flow statement for a ticker (operating/investing/financing cash flow, free cash flow).",
-        "get_eps": "Get trailing earnings per share (EPS) for a ticker.",
-        "get_revenue": "Get trailing twelve-month revenue for a ticker.",
+        "get_eps": "Get EPS with its actual source and period; annual fallback is not TTM EPS.",
+        "get_revenue": "Get reported revenue with its actual period (TTM, annual, or unknown).",
     }
 
     return [

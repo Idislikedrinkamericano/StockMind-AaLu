@@ -399,24 +399,6 @@ def _fallback_text(state: StockAgentState) -> str:
     return "\n".join(lines)
 
 
-def _fallback_report(ticker: str, text: str, note: str) -> StockResearchReport:
-    return StockResearchReport(
-        ticker=ticker,
-        summary=text,
-        market_analysis="Not covered in this phase.",
-        financial_analysis="Not covered in this phase.",
-        technical_analysis="Not covered in this phase.",
-        news_analysis="Not covered in this phase.",
-        valuation_analysis="Not covered in this phase.",
-        risk_analysis="Not covered in this phase.",
-        bull_case=[],
-        bear_case=[],
-        key_metrics={},
-        uncertainty=[note],
-        conclusion=text,
-    )
-
-
 def _no_data_report(ticker: str, language: str, errors: list[str]) -> StockResearchReport:
     """Honest report when no tool observation was collected (e.g. all tools failed)."""
     if language == "zh":
@@ -491,7 +473,7 @@ async def _generate_report(
     if state.get("status") == "timeout":
         return grounded, None
     start = time.perf_counter()
-    # 1) Prefer native structured output.
+    # 1) Validate an optional structured LLM candidate; return the grounded report.
     try:
         structured_llm = llm.with_structured_output(StockResearchReport)
         messages: list[BaseMessage] = [
@@ -535,8 +517,8 @@ async def _generate_report(
             ),
         )
 
-    # 2) The final answer may already be valid JSON (e.g. the offline demo),
-    # but JSON/schema validity is not evidence validity.
+    # 2) A final LLM message may already be JSON; the scripted demo uses a marker.
+    # JSON/schema validity is not evidence validity.
     try:
         candidate = StockResearchReport.model_validate_json(final_report)
         valid, reason = _candidate_report_is_valid(candidate, state, grounded if state.get("observations") else None)

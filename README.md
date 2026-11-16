@@ -23,8 +23,8 @@ LLM prose or schema-valid JSON is not evidence on its own.
 - ReAct-style workflow with bounded iterations, tool retries, and LLM, tool,
   and whole-run timeouts.
 - Market, financial-statement, news, technical-analysis, and valuation tools.
-- Deterministic MA, RSI, MACD, volatility, drawdown, P/E, EV/EBITDA, FCF-yield,
-  and DCF calculations.
+- Deterministic MA, RSI, MACD, volatility, drawdown, P/E, EV/EBITDA, and FCF-yield
+  calculations; DCF scenarios require a confirmed cash-flow and share basis.
 - Structured `StockResearchReport` output in English or Simplified Chinese.
 - Explicit state, tracing, optional in-memory or SQLite checkpoints, and a
   repeatable offline scripted demo.
@@ -140,6 +140,9 @@ within the workflow's iteration and time limits. Data remains mock unless
   qualitative interpretation is not investment advice.
 - Missing, non-finite, or incomplete provider data can yield unavailable report
   sections. StockMind does not synthesize missing prices, debt, or indicators.
+- Valuations disclose each input's source and period, including unknown or mixed
+  periods. Current providers do not establish FCFF/FCFE, so their DCF is
+  unavailable; annual EPS fallback is never labelled TTM.
 - This project does not provide trading execution, portfolio optimisation, or
   historical backtesting.
 

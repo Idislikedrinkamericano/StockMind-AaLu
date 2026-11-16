@@ -136,3 +136,38 @@ def test_akshare_key_stats(monkeypatch):
     result = _provider(monkeypatch).get_key_stats("MU")
     assert result.market_cap == 100e9
     assert result.eps_ttm == 49.0
+
+
+def test_akshare_preserves_annual_period_and_actual_financial_source(monkeypatch):
+    provider = _provider(monkeypatch)
+    income = provider.get_income_statement("MU")
+    cashflow = provider.get_cash_flow("MU")
+    balance = provider.get_balance_sheet("MU")
+    for record in (income, cashflow, balance):
+        assert record.source == "akshare/eastmoney"
+        assert record.period_end == "2025-12-31"
+        assert record.published_at is None  # report end is not publication time
+    assert income.period == cashflow.period == "annual"
+    assert balance.period == "instant"
+    assert cashflow.cash_flow_basis == "unknown"  # OCF minus capex is not proof of FCFF
+    stats = provider.get_key_stats("MU")
+    assert stats.field_metadata["market_cap"]["source"] == "akshare/baidu"
+    assert stats.field_metadata["market_cap"]["period_end"] == "2026-08-15"
+    assert stats.field_metadata["eps_ttm"]["input_dates"]["pe"] == "2026-08-15"
+    assert stats.shares_basis == "derived_market_cap_over_price"
+
+
+def test_akshare_uses_publication_date_only_when_explicit(monkeypatch):
+    balance = _balance(("总债务", 10e9))
+    balance["NOTICE_DATE"] = "2026-02-01"
+    result = _provider(monkeypatch, balance=balance).get_balance_sheet("MU")
+    assert result.published_at == "2026-02-01"
+    assert result.period_end == "2025-12-31"
+
+
+def test_akshare_missing_report_date_does_not_invent_period(monkeypatch):
+    balance = pd.DataFrame([{"ITEM_NAME": "总债务", "AMOUNT": 10e9}])
+    result = _provider(monkeypatch, balance=balance).get_balance_sheet("MU")
+    assert result.total_debt is None
+    assert result.period == "unknown"
+    assert result.period_end is None

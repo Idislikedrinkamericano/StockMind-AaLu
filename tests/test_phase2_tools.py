@@ -63,8 +63,9 @@ def test_valuation_tools():
         terminal_growth=0.03,
         years=5,
     )
-    assert dcf["value"]["intrinsic_value_per_share"] > 0
-    assert "assumptions" in dcf["value"]
+    assert dcf["value"] is None
+    assert dcf["status"] == "unavailable"
+    assert "cash-flow basis unknown" in dcf["note"]
 
 
 def test_technical_tools():

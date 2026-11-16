@@ -20,7 +20,8 @@ StockMind 通过显式的 LangGraph 工作流实现 Agent 循环，而不是将�
 
 - 带迭代上限、工具重试、LLM/工具/整次运行超时控制的 ReAct 风格工作流。
 - 市场数据、财务报表、新闻、技术分析和估值工具。
-- MA、RSI、MACD、波动率、回撤、P/E、EV/EBITDA、FCF 收益率和 DCF 的确定性计算。
+- MA、RSI、MACD、波动率、回撤、P/E、EV/EBITDA 和 FCF 收益率的确定性计算；DCF 情景
+  估值要求现金流性质和股数口径明确。
 - 英文或简体中文的结构化 `StockResearchReport` 输出。
 - 显式 State、追踪、可选内存或 SQLite checkpoint，以及可重复的离线脚本化演示。
 - 默认确定性的 **mock 数据**，并明确标注为模拟数据；可选 yfinance 与 AkShare
@@ -127,6 +128,8 @@ python examples/research.py --tickers AAPL --lang en
 - 真实 LLM 输出受超时与已验证观测结果约束，但其定性解读并非投资建议。
 - Provider 数据缺失、非有限或不完整时，报告的相应部分可能不可用。StockMind 不会合成
   缺失的市场价格、债务或技术指标。
+- 估值会披露各输入的来源与期间，包括 unknown 或 mixed-period。当前 Provider 无法
+  确认 FCFF/FCFE，因此其 DCF 不可用；年度 EPS 回退不会被标成 TTM。
 - 本项目不提供交易执行、投资组合优化或历史回测。
 
 ## 文档

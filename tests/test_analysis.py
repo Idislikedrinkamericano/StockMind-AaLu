@@ -1,5 +1,3 @@
-import math
-
 import pytest
 
 from app.tools import analysis
@@ -109,12 +107,14 @@ def test_compute_fcf_yield():
 
 def test_compute_dcf_valid_and_invalid():
     result = analysis.compute_dcf(
-        100.0, 100.0, growth_rate=0.10, discount_rate=0.12, terminal_growth=0.03, years=5
+        100.0, 100.0, growth_rate=0.10, discount_rate=0.12, terminal_growth=0.03, years=5,
+        cash_flow_basis="FCFE",
     )
     assert result is not None
     assert result["intrinsic_value_per_share"] > 0
     assert "growth_rate" in result["assumptions"]
 
     assert analysis.compute_dcf(
-        100.0, 100.0, growth_rate=0.10, discount_rate=0.05, terminal_growth=0.06, years=5
+        100.0, 100.0, growth_rate=0.10, discount_rate=0.05, terminal_growth=0.06, years=5,
+        cash_flow_basis="FCFE",
     ) is None

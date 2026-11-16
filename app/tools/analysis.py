@@ -7,6 +7,7 @@ functions and attach provenance to the result.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -219,42 +220,65 @@ def compute_dcf(
     discount_rate: float = 0.10,
     terminal_growth: float = 0.03,
     years: int = 5,
+    cash_flow_basis: str = "unknown",
+    net_debt: float | None = None,
 ) -> dict[str, Any] | None:
-    """Simple two-stage DCF. Returns intrinsic value per share plus assumptions.
+    """Two-stage scenario: FCFF/WACC -> EV minus net debt; FCFE/Ke -> equity.
 
-    This intentionally ignores net-debt adjustments and uses FCF directly as the
-    cash-flow proxy — a simplification that must be disclosed to the user.
+    The caller must establish the cash-flow and outstanding-share basis. Unknown
+    FCF is deliberately unavailable, not silently treated as FCFF or FCFE.
     """
+    inputs = (free_cash_flow, shares_outstanding, growth_rate, discount_rate, terminal_growth)
+    if any(value is None or not math.isfinite(value) for value in inputs):
+        return None
     if (
-        free_cash_flow is None
-        or shares_outstanding is None
-        or free_cash_flow <= 0
+        free_cash_flow <= 0
         or shares_outstanding <= 0
+        or cash_flow_basis not in {"FCFF", "FCFE"}
+        or discount_rate <= 0
         or discount_rate <= terminal_growth
-        or years <= 0
+        or growth_rate <= -1
+        or terminal_growth <= -1
+        or isinstance(years, bool)
+        or not isinstance(years, int)
+        or not 1 <= years <= 20
     ):
         return None
+    if cash_flow_basis == "FCFF" and (net_debt is None or not math.isfinite(net_debt)):
+        return None
 
-    pv_sum = 0.0
-    cash_flow = free_cash_flow
-    for year in range(1, years + 1):
-        cash_flow = free_cash_flow * (1 + growth_rate) ** year
-        pv_sum += cash_flow / (1 + discount_rate) ** year
-
-    terminal_value = (
-        cash_flow * (1 + terminal_growth) / (discount_rate - terminal_growth)
-    ) / (1 + discount_rate) ** years
-    enterprise_value = pv_sum + terminal_value
-    per_share = enterprise_value / shares_outstanding
+    try:
+        pv_sum = 0.0
+        cash_flow = free_cash_flow
+        for year in range(1, years + 1):
+            cash_flow = free_cash_flow * (1 + growth_rate) ** year
+            pv_sum += cash_flow / (1 + discount_rate) ** year
+        terminal_value = (
+            cash_flow * (1 + terminal_growth) / (discount_rate - terminal_growth)
+        ) / (1 + discount_rate) ** years
+        present_value = pv_sum + terminal_value
+        enterprise_value = present_value if cash_flow_basis == "FCFF" else None
+        equity_value = present_value - net_debt if cash_flow_basis == "FCFF" else present_value
+        per_share = equity_value / shares_outstanding
+    except (OverflowError, ZeroDivisionError):
+        return None
+    if not all(math.isfinite(value) for value in (present_value, equity_value, per_share)) or equity_value <= 0:
+        return None
 
     return {
         "intrinsic_value_per_share": round(per_share, 2),
+        "enterprise_value": round(enterprise_value, 2) if enterprise_value is not None else None,
+        "equity_value": round(equity_value, 2),
         "assumptions": {
             "free_cash_flow": round(free_cash_flow, 2),
             "growth_rate": growth_rate,
             "discount_rate": discount_rate,
             "terminal_growth": terminal_growth,
             "projection_years": years,
-            "note": "Simplified DCF: uses FCF as cash-flow proxy and ignores net-debt adjustments.",
+            "cash_flow_basis": cash_flow_basis,
+            "discount_rate_basis": "WACC" if cash_flow_basis == "FCFF" else "cost_of_equity",
+            "net_debt": net_debt if cash_flow_basis == "FCFF" else None,
+            "shares_outstanding": shares_outstanding,
+            "note": "Simplified two-stage scenario; growth and discount rates are assumptions, not observed facts.",
         },
     }

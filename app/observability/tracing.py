@@ -7,7 +7,6 @@ in-memory for a human-readable summary and optionally appended to JSONL on disk.
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from datetime import datetime, timezone
@@ -117,21 +116,16 @@ class TraceCollector:
         for event in self.events:
             if event.event_type == "agent_step":
                 label = "llm_reason"
-                detail = ""
             elif event.event_type == "tool_call":
                 label = event.tool_name or "tool"
-                detail = ""
             elif event.event_type == "tool_result":
                 continue
             elif event.event_type == "finalize":
                 label = "final_llm_call"
-                detail = ""
             elif event.event_type == "finalize_fallback":
                 label = "finalize_fallback"
-                detail = ""
             elif event.event_type == "run_end":
                 label = f"run_end (status={event.final_status})"
-                detail = ""
             else:
                 continue
             latency = f"  {event.latency_ms / 1000.0:.2f}s" if event.latency_ms is not None else ""
