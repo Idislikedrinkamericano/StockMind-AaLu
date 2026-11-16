@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -58,6 +59,8 @@ class StockMindAgent:
         if config is None:
             self.config = AgentConfig(
                 max_iterations=_env_int("STOCKMIND_MAX_ITERATIONS", 8),
+                llm_timeout_seconds=_env_float("STOCKMIND_LLM_TIMEOUT_SECONDS", 20.0),
+                run_timeout_seconds=_env_float("STOCKMIND_RUN_TIMEOUT_SECONDS", 60.0),
                 tool_timeout_seconds=_env_float("STOCKMIND_TOOL_TIMEOUT_SECONDS", 15.0),
                 tool_retries=_env_int("STOCKMIND_TOOL_RETRIES", 1),
                 retry_backoff_seconds=_env_float("STOCKMIND_RETRY_BACKOFF_SECONDS", 0.5),
@@ -111,6 +114,7 @@ class StockMindAgent:
         meta = dict(metadata or {})
         run_id = self.tracer.start_run(user_query)
         meta.setdefault("run_id", run_id)
+        meta["run_deadline_monotonic"] = time.monotonic() + self.config.run_timeout_seconds
 
         state = create_initial_state(
             user_query,

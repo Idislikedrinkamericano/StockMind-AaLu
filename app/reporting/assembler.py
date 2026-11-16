@@ -56,8 +56,19 @@ def build_grounded_report(state: dict[str, Any], language: str = "en") -> StockR
     data: dict[str, dict[str, Any]] = {}
     for obs in observations:
         name = obs.get("tool")
-        if name and name not in data:
-            data[name] = _load(obs)
+        args = obs.get("args") or {}
+        requested_ticker = args.get("ticker")
+        if requested_ticker is not None and str(requested_ticker).strip().upper() != ticker:
+            continue
+        payload = _load(obs)
+        payload_ticker = payload.get("ticker")
+        if payload_ticker not in (None, "MARKET") and str(payload_ticker).strip().upper() != ticker:
+            continue
+        if name and payload and name not in data:
+            data[name] = payload
+
+    if not data:
+        return None
 
     price = data.get("get_stock_price", {})
     hist = data.get("get_historical_prices", {})
@@ -123,125 +134,115 @@ def build_grounded_report(state: dict[str, Any], language: str = "en") -> StockR
         "data_sources": sources,
     }
 
-    news_titles = [item.get("title", "") for item in news.get("items", [])][:3]
-    news_blob = "; ".join(news_titles) if news_titles else "None returned"
+    has_price = price_v is not None
+    has_history = bool(closes)
+    has_financials = any(
+        value is not None
+        for value in (
+            income.get("revenue"), income.get("net_income"), income.get("ebitda"),
+            cashflow.get("free_cash_flow"), balance.get("total_debt"),
+        )
+    )
+    has_technical = any(value is not None for value in (ma_v, rsi_v, macd_v.get("macd"), vol_v, dd_v.get("max_drawdown")))
+    has_valuation = any(value is not None for value in (pe_v, ev_v, fy_v, dcf_v.get("intrinsic_value_per_share")))
+    has_risk = vol_v is not None or dd_v.get("max_drawdown") is not None
+    has_news = bool(news)
+    news_titles = [item.get("title", "") for item in news.get("items", []) if item.get("title")][:3]
+    news_blob = "; ".join(news_titles)
+
+    missing = []
+    if not has_price:
+        missing.append("current price")
+    if not has_history:
+        missing.append("historical prices")
+    if not has_financials:
+        missing.append("financial statements")
+    if not has_technical:
+        missing.append("technical indicators")
+    if not has_valuation:
+        missing.append("valuation metrics")
+    if not has_risk:
+        missing.append("risk metrics")
+    if not has_news:
+        missing.append("company news")
+
+    bull_case: list[str] = []
+    bear_case: list[str] = []
+    if rsi_v is not None and 30 <= float(rsi_v) <= 70:
+        bull_case.append(f"RSI {_num(rsi_v, 1)} is in the neutral range; this is an observed indicator, not a recommendation.")
+    if fy_v is not None:
+        bull_case.append(f"Observed FCF yield is {_pct(fy_v)}; no attractiveness judgment is inferred from this metric alone.")
+    if change is not None and change < 0:
+        bear_case.append(f"The observed historical window returned {_pct(change)}.")
+    if dd_v.get("max_drawdown") is not None:
+        bear_case.append(f"Observed maximum drawdown is {_pct(dd_v.get('max_drawdown'))}.")
+
+    uncertainty = [
+        "This report was assembled deterministically from valid tool observations; unsupported LLM claims were not used."
+    ]
+    if any(source == "mock" or "mock" in source.lower() for source in sources):
+        uncertainty.append("The available data source is mock/simulated and must not be treated as real market data.")
+    if dcf_v:
+        uncertainty.append("DCF is a simplified two-stage model; assumptions are inputs, not facts.")
+    if missing:
+        uncertainty.append("Insufficient evidence for: " + ", ".join(missing) + ".")
+
+    market_en = (
+        f"Latest price {_num(price_v)} {currency} (source: {_source(price)})."
+        if has_price else "Unavailable: no valid current-price observation."
+    )
+    if has_history:
+        market_en += f" Session range {_num(lo)}–{_num(hi)}, cumulative change {_pct(change)}. Window: {hist.get('data_period') or hist.get('period')}."
+    financial_en = (
+        f"Revenue {_num(income.get('revenue'))}, net income {_num(income.get('net_income'))}, EBITDA {_num(income.get('ebitda'))}, EPS {_num(income.get('eps_diluted'))}; free cash flow {_num(cashflow.get('free_cash_flow'))}, total debt {_num(balance.get('total_debt'))}, cash {_num(balance.get('cash_and_equivalents'))}."
+        if has_financials else "Unavailable: insufficient valid financial-statement observations."
+    )
+    technical_en = (
+        f"RSI {_num(rsi_v, 1)}, moving average {_num(ma_v)}, MACD {_num(macd_v.get('macd'), 3)}/signal {_num(macd_v.get('signal'), 3)}, annualized volatility {_pct(vol_v)}."
+        if has_technical else "Unavailable: insufficient valid technical-indicator observations."
+    )
+    valuation_en = (
+        f"P/E {_num(pe_v, 1)}, EV/EBITDA {_num(ev_v, 1)}, FCF yield {_pct(fy_v)}, DCF intrinsic value per share {_num(dcf_v.get('intrinsic_value_per_share'))}."
+        if has_valuation else "Unavailable: insufficient valid valuation observations."
+    )
+    risk_en = (
+        f"Annualized volatility {_pct(vol_v)}, max drawdown {_pct(dd_v.get('max_drawdown'))}, current drawdown {_pct(dd_v.get('current_drawdown'))}."
+        if has_risk else "Unavailable: insufficient valid risk observations."
+    )
+    news_en = (
+        f"{len(news.get('items', []))} company news item(s) were returned" + (f": {news_blob}." if news_blob else ".")
+        if has_news else "Unavailable: no valid company-news observation."
+    )
 
     if language == "zh":
         return StockResearchReport(
             ticker=ticker,
-            summary=(
-                f"{ticker} 最新价格 {_num(price_v)} {currency}，近 {len(closes)} 个交易日"
-                f"由 {_num(first)} 变为 {_num(last)}（{_pct(change)}）。"
-                f"估值 P/E {_num(pe_v, 1)}、FCF 收益率 {_pct(fy_v)}，RSI {_num(rsi_v, 1)}，"
-                f"年化波动率 {_pct(vol_v)}。以下所有数字均来自工具观测，非模型推测。"
-            ),
-            market_analysis=(
-                f"最新价 {_num(price_v)} {currency}（来源：{_source(price)}）。"
-                f"区间 {_num(lo)}–{_num(hi)}，累计涨跌幅 {_pct(change)}。"
-                f"数据区间 {hist.get('data_period') or hist.get('period')}。"
-            ),
-            financial_analysis=(
-                f"营收 {_num(income.get('revenue'))}，净利润 {_num(income.get('net_income'))}，"
-                f"EBITDA {_num(income.get('ebitda'))}，EPS {_num(income.get('eps_diluted'))}；"
-                f"自由现金流 {_num(cashflow.get('free_cash_flow'))}，总债务 {_num(balance.get('total_debt'))}，"
-                f"现金 {_num(balance.get('cash_and_equivalents'))}。"
-                f"（来源：{_source(income)}）"
-            ),
-            technical_analysis=(
-                f"RSI {_num(rsi_v, 1)}，均线 MA {_num(ma_v)}，"
-                f"MACD {_num(macd_v.get('macd'), 3)}/信号 {_num(macd_v.get('signal'), 3)}。"
-                f"朴素线性外推（非预测）：20 日后约 {_num(projected_price)}。"
-                f"（来源：{_source(rsi)}）"
-            ),
-            news_analysis=(
-                f"公司新闻 {len(news.get('items', []))} 条，示例：{news_blob}。"
-                f"（来源：{_source(news)}）"
-            ),
-            valuation_analysis=(
-                f"P/E {_num(pe_v, 1)}，EV/EBITDA {_num(ev_v, 1)}，FCF 收益率 {_pct(fy_v)}，"
-                f"DCF 每股内在价值 {_num(dcf_v.get('intrinsic_value_per_share'))}。"
-                f"（来源：{_source(pe)}）"
-            ),
-            risk_analysis=(
-                f"年化波动率 {_pct(vol_v)}，最大回撤 {_pct(dd_v.get('max_drawdown'))}，"
-                f"当前回撤 {_pct(dd_v.get('current_drawdown'))}。"
-                f"（来源：{_source(vol)}）"
-            ),
-            bull_case=[
-                f"RSI {_num(rsi_v, 1)} 处于中性区间，未出现极端超买。",
-                f"P/E {_num(pe_v, 1)} 与 FCF 收益率 {_pct(fy_v)} 提供了可比较的估值锚点。",
-            ],
-            bear_case=[
-                f"近 {len(closes)} 日涨跌幅 {_pct(change)}，最大回撤 {_pct(dd_v.get('max_drawdown'))}，波动风险上升。",
-                "新闻面存在监管与宏观不确定性（见新闻分析）。",
-            ],
+            summary=f"{ticker} 的报告仅使用有效工具观测生成。" + (f" 已观测当前价格 {_num(price_v)} {currency}。" if has_price else " 当前价格不可用。"),
+            market_analysis=market_en,
+            financial_analysis=financial_en,
+            technical_analysis=technical_en,
+            news_analysis=news_en,
+            valuation_analysis=valuation_en,
+            risk_analysis=risk_en,
+            bull_case=bull_case,
+            bear_case=bear_case,
             key_metrics=key_metrics,
-            uncertainty=[
-                "本报告由离线组装器基于工具观测生成，未经过 LLM 语义润色。",
-                "若数据源为 mock，则所有数字均为模拟数据，不得视为真实行情。",
-                "DCF 为简化两阶段模型，假设是输入而非事实。",
-            ],
-            conclusion=(
-                f"{ticker} 当前价格 {_num(price_v)} {currency}，估值与动量指标均已通过工具"
-                f"计算并标注来源。是否具有吸引力取决于风险偏好与真实数据；模拟数据仅用于流程演示。"
-            ),
+            uncertainty=uncertainty,
+            conclusion="证据不足的领域未作投资结论；本报告不构成投资建议。",
         )
 
     return StockResearchReport(
         ticker=ticker,
-        summary=(
-            f"{ticker}'s latest price is {_num(price_v)} {currency}; over the last {len(closes)} "
-            f"sessions it moved from {_num(first)} to {_num(last)} ({_pct(change)}). "
-            f"Valuation shows P/E {_num(pe_v, 1)} and FCF yield {_pct(fy_v)}, with RSI {_num(rsi_v, 1)} "
-            f"and annualized volatility {_pct(vol_v)}. All figures come from tool observations, not model inference."
-        ),
-        market_analysis=(
-            f"Latest price {_num(price_v)} {currency} (source: {_source(price)}). "
-            f"Session range {_num(lo)}–{_num(hi)}, cumulative change {_pct(change)}. "
-            f"Window: {hist.get('data_period') or hist.get('period')}."
-        ),
-        financial_analysis=(
-            f"Revenue {_num(income.get('revenue'))}, net income {_num(income.get('net_income'))}, "
-            f"EBITDA {_num(income.get('ebitda'))}, EPS {_num(income.get('eps_diluted'))}; "
-            f"free cash flow {_num(cashflow.get('free_cash_flow'))}, total debt {_num(balance.get('total_debt'))}, "
-            f"cash {_num(balance.get('cash_and_equivalents'))}. (source: {_source(income)})"
-        ),
-        technical_analysis=(
-            f"RSI {_num(rsi_v, 1)}, moving average {_num(ma_v)}, "
-            f"MACD {_num(macd_v.get('macd'), 3)}/signal {_num(macd_v.get('signal'), 3)}. "
-            f"Naive linear extrapolation (not a prediction): ~{_num(projected_price)} in 20 sessions. "
-            f"(source: {_source(rsi)})"
-        ),
-        news_analysis=(
-            f"{len(news.get('items', []))} company news item(s); examples: {news_blob}. "
-            f"(source: {_source(news)})"
-        ),
-        valuation_analysis=(
-            f"P/E {_num(pe_v, 1)}, EV/EBITDA {_num(ev_v, 1)}, FCF yield {_pct(fy_v)}, "
-            f"DCF intrinsic value per share {_num(dcf_v.get('intrinsic_value_per_share'))}. "
-            f"(source: {_source(pe)})"
-        ),
-        risk_analysis=(
-            f"Annualized volatility {_pct(vol_v)}, max drawdown {_pct(dd_v.get('max_drawdown'))}, "
-            f"current drawdown {_pct(dd_v.get('current_drawdown'))}. (source: {_source(vol)})"
-        ),
-        bull_case=[
-            f"RSI {_num(rsi_v, 1)} sits in the neutral zone, not extreme overbought.",
-            f"P/E {_num(pe_v, 1)} and FCF yield {_pct(fy_v)} provide a comparable valuation anchor.",
-        ],
-        bear_case=[
-            f"{len(closes)}-session change of {_pct(change)} with max drawdown {_pct(dd_v.get('max_drawdown'))} points to elevated downside risk.",
-            "News flow includes regulatory and macro uncertainty (see news analysis).",
-        ],
+        summary=f"{ticker} report assembled only from valid tool observations." + (f" Observed latest price: {_num(price_v)} {currency}." if has_price else " Current price is unavailable."),
+        market_analysis=market_en,
+        financial_analysis=financial_en,
+        technical_analysis=technical_en,
+        news_analysis=news_en,
+        valuation_analysis=valuation_en,
+        risk_analysis=risk_en,
+        bull_case=bull_case,
+        bear_case=bear_case,
         key_metrics=key_metrics,
-        uncertainty=[
-            "This report was assembled deterministically from tool observations, without LLM polish.",
-            "If the data source is mock, all figures are simulated and must not be treated as real.",
-            "DCF is a simplified two-stage model; assumptions are inputs, not facts.",
-        ],
-        conclusion=(
-            f"{ticker} trades at {_num(price_v)} {currency} with valuation and momentum metrics "
-            "computed by tools and cited with sources. Whether that is attractive depends on risk "
-            "tolerance and real data; simulated data is for workflow demonstration only."
-        ),
+        uncertainty=uncertainty,
+        conclusion="No investment conclusion is made for areas with insufficient evidence. This is not investment advice.",
     )

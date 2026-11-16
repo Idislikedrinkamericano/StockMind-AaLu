@@ -1,9 +1,13 @@
+import json
+
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
 from app.agents.react_agent import StockMindAgent
 from app.graph.workflow import AgentConfig
 from app.models.demo import GROUNDED_REPORT_MARKER
+from app.reporting.assembler import build_grounded_report
+from app.schemas.report import StockResearchReport
 from app.tools import build_tools
 from app.tools.providers import MockMarketDataProvider
 
@@ -102,3 +106,103 @@ def test_no_observations_does_not_leak_internal_marker():
     assert GROUNDED_REPORT_MARKER not in report.summary
     assert GROUNDED_REPORT_MARKER not in report.conclusion
     assert report.summary
+    assert "no evidence" in report.summary.lower()
+
+
+def test_hallucinated_llm_metric_is_replaced_by_grounded_observation():
+    hallucinated = StockResearchReport(
+        ticker="NVDA",
+        summary="NVDA is worth $999999.",
+        conclusion="Buy based on the invented price.",
+        key_metrics={"price": 999999.0, "pe": 0.01},
+    )
+    agent = _make_agent(
+        [
+            AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "NVDA"}, "id": "c1"}]),
+            AIMessage(content=hallucinated.model_dump_json()),
+        ]
+    )
+    report = agent.invoke("Analyze NVDA", ticker="NVDA")
+    tool_event = next(event for event in agent.tracer.events if event.tool_name == "get_stock_price")
+    observed_price = json.loads(tool_event.tool_output)["price"]
+    assert report.key_metrics["price"] == observed_price
+    assert report.key_metrics["price"] != 999999.0
+    assert "999999" not in report.summary
+
+
+def test_wrong_llm_report_ticker_is_rejected_and_state_ticker_is_preserved():
+    agent = _make_agent(
+        [
+            AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "NVDA"}, "id": "c1"}]),
+            AIMessage(content=_final_json("AMD")),
+        ]
+    )
+    report = agent.invoke("Analyze NVDA", ticker="NVDA")
+    assert report.ticker == "NVDA"
+    assert any("report ticker" in (event.error or "") for event in agent.tracer.events)
+
+
+def test_wrong_tool_ticker_is_blocked_in_single_stock_mode():
+    agent = _make_agent(
+        [
+            AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "AMD"}, "id": "c1"}]),
+            AIMessage(content=_final_json("NVDA")),
+        ]
+    )
+    state = agent.run("Analyze NVDA", ticker="NVDA")
+    assert state["observations"] == []
+    assert any("Ticker mismatch" in error for error in state["errors"])
+    assert state["final_output"].ticker == "NVDA"
+    assert "no evidence" in state["final_output"].summary.lower()
+
+
+def _observation(tool: str, payload: dict, ticker: str = "NVDA") -> dict:
+    return {"tool": tool, "args": {"ticker": ticker}, "result": json.dumps(payload)}
+
+
+def test_assembler_only_price_marks_other_sections_unavailable():
+    state = {
+        "ticker": "NVDA",
+        "observations": [_observation("get_stock_price", {"ticker": "NVDA", "price": 100.0, "currency": "USD", "source": "fixture"})],
+    }
+    report = build_grounded_report(state)
+    assert report is not None
+    assert report.key_metrics["price"] == 100.0
+    assert report.financial_analysis.startswith("Unavailable")
+    assert report.valuation_analysis.startswith("Unavailable")
+    assert report.bull_case == []
+
+
+def test_assembler_partial_technical_evidence_does_not_create_valuation_or_news_claims():
+    state = {
+        "ticker": "NVDA",
+        "observations": [
+            _observation("calculate_rsi", {"metric": "rsi", "value": 50.0, "source": "fixture"}),
+        ],
+    }
+    report = build_grounded_report(state)
+    assert report is not None
+    assert "RSI 50.0" in report.technical_analysis
+    assert report.valuation_analysis.startswith("Unavailable")
+    assert report.news_analysis.startswith("Unavailable")
+    assert all("P/E" not in item for item in report.bull_case)
+
+
+def test_assembler_news_failure_is_reported_as_unavailable_without_a_news_claim():
+    state = {
+        "ticker": "NVDA",
+        "errors": ["search_company_news: timeout"],
+        "observations": [_observation("get_stock_price", {"ticker": "NVDA", "price": 100.0, "currency": "USD", "source": "fixture"})],
+    }
+    report = build_grounded_report(state)
+    assert report is not None
+    assert report.news_analysis == "Unavailable: no valid company-news observation."
+    assert all("News flow" not in item for item in report.bear_case)
+
+
+def test_assembler_ignores_observation_for_the_wrong_ticker():
+    state = {
+        "ticker": "NVDA",
+        "observations": [_observation("get_stock_price", {"ticker": "AMD", "price": 100.0, "source": "fixture"}, ticker="AMD")],
+    }
+    assert build_grounded_report(state) is None

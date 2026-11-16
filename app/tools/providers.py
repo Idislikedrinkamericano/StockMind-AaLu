@@ -12,6 +12,7 @@ providers are swappable via configuration:
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import random
 from abc import ABC, abstractmethod
@@ -31,7 +32,7 @@ def _as_float(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if number != number:  # NaN
+    if not math.isfinite(number):
         return None
     return number
 
@@ -667,19 +668,34 @@ class AkShareMarketDataProvider(MarketDataProvider):
             raise ValueError(f"No historical data found for ticker {symbol!r}")
         df = df.tail(self._period_days(period))
         bars: list[PriceBar] = []
+        skipped_rows = 0
         for _, row in df.iterrows():
-            volume = _as_float(row.get("volume")) or 0
-            date_val = row.get("date") or row.get("index") or ""
+            open_ = _as_float(row.get("open"))
+            high = _as_float(row.get("high"))
+            low = _as_float(row.get("low"))
+            close = _as_float(row.get("close"))
+            date_val = row.get("date") or row.get("index")
+            # PriceBar has non-optional OHLC fields. Never replace a missing or
+            # invalid value with zero: omit the entire unusable bar instead.
+            if None in (open_, high, low, close) or date_val is None:
+                skipped_rows += 1
+                continue
+            volume = _as_float(row.get("volume"))
             bars.append(
                 PriceBar(
                     date=str(date_val)[:10],
-                    open=float(_as_float(row.get("open")) or 0.0),
-                    high=float(_as_float(row.get("high")) or 0.0),
-                    low=float(_as_float(row.get("low")) or 0.0),
-                    close=float(_as_float(row.get("close")) or 0.0),
-                    volume=int(volume),
+                    open=float(open_),
+                    high=float(high),
+                    low=float(low),
+                    close=float(close),
+                    volume=int(volume) if volume is not None else 0,
                 )
             )
+        if not bars:
+            raise ValueError(f"No valid historical OHLC data found for ticker {symbol!r}")
+        note = self.NOTE
+        if skipped_rows:
+            note += f" Skipped {skipped_rows} row(s) with missing or invalid OHLC values."
         return HistoricalPricesResult(
             ticker=symbol,
             period=period,
@@ -688,7 +704,7 @@ class AkShareMarketDataProvider(MarketDataProvider):
             source=self.SOURCE,
             timestamp=utc_now(),
             data_period=period,
-            note=self.NOTE,
+            note=note,
         )
 
     def _report_map(self, ticker: str, statement: str) -> dict[str, float | None]:
@@ -711,6 +727,31 @@ class AkShareMarketDataProvider(MarketDataProvider):
             if value is not None and any(keyword in name for keyword in keywords):
                 return value
         return None
+
+    @staticmethod
+    def _total_debt(items: dict[str, float | None]) -> float | None:
+        """Return a reliable interest-bearing debt total, never a partial component.
+
+        Eastmoney labels vary by issuer. A reported total is preferred. Without
+        one, both explicit short-term and long-term debt components are required
+        before calculating a total; total liabilities are deliberately excluded.
+        """
+        exact_total_labels = {"总债务", "债务合计", "有息负债合计"}
+        for name, value in items.items():
+            if name.strip() in exact_total_labels and value is not None:
+                return value
+
+        def component(labels: set[str]) -> float | None:
+            for name, value in items.items():
+                if name.strip() in labels and value is not None:
+                    return value
+            return None
+
+        short_term = component({"短期借款", "短期债务", "一年内到期的长期债务", "一年内到期的非流动负债"})
+        long_term = component({"长期借款", "长期债务", "应付债券"})
+        if short_term is None or long_term is None:
+            return None
+        return short_term + long_term
 
     def _valuation_latest(self, ticker: str, indicator: str) -> float | None:
         try:
@@ -761,16 +802,20 @@ class AkShareMarketDataProvider(MarketDataProvider):
     def get_balance_sheet(self, ticker: str) -> BalanceSheet:
         symbol = ticker.upper().strip()
         items = self._report_map(symbol, "资产负债表")
+        total_debt = self._total_debt(items)
+        note = "Parsed from Eastmoney balance sheet (latest annual, best-effort)."
+        if items and total_debt is None:
+            note += " Total debt unavailable: no reported total or complete short-/long-term debt components."
         return BalanceSheet(
             ticker=symbol,
             total_assets=self._find(items, "资产总计", "资产合计"),
             total_liabilities=self._find(items, "负债合计", "负债总计"),
-            total_debt=self._find(items, "总债务", "债务合计", "长期债务", "短期债务"),
+            total_debt=total_debt,
             cash_and_equivalents=self._find(items, "现金及现金等价物", "货币资金"),
             total_equity=self._find(items, "股东权益合计", "所有者权益合计"),
             source=self.SOURCE,
             timestamp=utc_now(),
-            note="Parsed from Eastmoney balance sheet (latest annual, best-effort).",
+            note=note,
         )
 
     def get_cash_flow(self, ticker: str) -> CashFlow:

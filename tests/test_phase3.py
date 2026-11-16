@@ -1,9 +1,13 @@
 import asyncio
 import json
+from typing import Any
 
 import pytest
+from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import StructuredTool
 
 from app.agents.react_agent import StockMindAgent
 from app.graph.checkpoint import build_checkpointer
@@ -12,6 +16,40 @@ from app.observability.tracing import TraceCollector
 from app.schemas.report import StockResearchReport
 from app.tools import build_tools
 from app.tools.providers import MockMarketDataProvider
+
+
+class DelayedSequenceModel(BaseChatModel):
+    """Async fake model used to test cancellation without an external provider."""
+
+    responses: list[tuple[float, AIMessage]]
+    calls: int = 0
+    structured_delay: float | None = None
+
+    @property
+    def _llm_type(self) -> str:
+        return "delayed-sequence-test-model"
+
+    def _generate(self, messages: list[BaseMessage], **kwargs: Any) -> ChatResult:
+        raise NotImplementedError("Tests use the async path")
+
+    async def _agenerate(self, messages: list[BaseMessage], **kwargs: Any) -> ChatResult:
+        self.calls += 1
+        delay, message = self.responses.pop(0)
+        await asyncio.sleep(delay)
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
+        if self.structured_delay is None:
+            raise NotImplementedError
+
+        delay = self.structured_delay
+
+        class SlowStructuredOutput:
+            async def ainvoke(self, messages: list[BaseMessage]) -> StockResearchReport:
+                await asyncio.sleep(delay)
+                return StockResearchReport(ticker="NVDA", summary="late", conclusion="late")
+
+        return SlowStructuredOutput()
 
 
 def _final_json(ticker="NVDA"):
@@ -114,3 +152,125 @@ def test_trace_summary_dedupes_repeated_errors():
         )
     summary = tracer.summarize()
     assert summary.count("YFRateLimitError") == 1
+
+
+def test_normal_async_llm_call_completes_within_timeout():
+    model = DelayedSequenceModel(responses=[(0.001, AIMessage(content=_final_json()))])
+    agent = StockMindAgent(
+        llm=model,
+        tools=[],
+        config=AgentConfig(llm_timeout_seconds=0.1, run_timeout_seconds=1.0),
+    )
+    state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
+    assert state["status"] == "finished"
+    assert model.calls == 1
+
+
+def test_llm_call_timeout_returns_safe_no_data_report():
+    model = DelayedSequenceModel(responses=[(0.05, AIMessage(content=_final_json()))])
+    agent = StockMindAgent(
+        llm=model,
+        tools=[],
+        config=AgentConfig(llm_timeout_seconds=0.01, run_timeout_seconds=1.0),
+    )
+    state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
+    assert state["status"] == "timeout"
+    assert state["observations"] == []
+    assert "no evidence" in state["final_output"].summary.lower()
+    assert any(error.startswith("llm_timeout") for error in state["errors"])
+
+
+def test_run_deadline_stops_slow_tool_before_another_agent_step():
+    calls = [0]
+
+    async def slow_price(ticker: str) -> str:
+        calls[0] += 1
+        await asyncio.sleep(0.05)
+        return json.dumps({"ticker": ticker, "price": 100.0, "source": "fixture"})
+
+    tool = StructuredTool.from_function(
+        coroutine=slow_price, name="get_stock_price", description="Slow test price tool."
+    )
+    model = DelayedSequenceModel(
+        responses=[
+            (0.001, AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "NVDA"}, "id": "c1"}])),
+            (0.001, AIMessage(content=_final_json())),
+        ]
+    )
+    agent = StockMindAgent(
+        llm=model,
+        tools=[tool],
+        config=AgentConfig(llm_timeout_seconds=1.0, tool_timeout_seconds=1.0, run_timeout_seconds=0.02, tool_retries=0),
+    )
+    state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
+    assert state["status"] == "timeout"
+    assert calls == [1]
+    assert model.calls == 1
+    assert state["observations"] == []
+    assert any(error.startswith("run_timeout") for error in state["errors"])
+
+
+def test_tool_retry_does_not_outlive_the_run_deadline():
+    attempts = [0]
+
+    async def failing_price(ticker: str) -> str:
+        attempts[0] += 1
+        raise RuntimeError("temporary failure")
+
+    tool = StructuredTool.from_function(
+        coroutine=failing_price, name="get_stock_price", description="Failing test price tool."
+    )
+    model = DelayedSequenceModel(
+        responses=[(0.001, AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "NVDA"}, "id": "c1"}]))]
+    )
+    agent = StockMindAgent(
+        llm=model,
+        tools=[tool],
+        config=AgentConfig(
+            llm_timeout_seconds=1.0,
+            tool_timeout_seconds=1.0,
+            run_timeout_seconds=0.02,
+            tool_retries=5,
+            retry_backoff_seconds=0.05,
+            retry_jitter=0.0,
+        ),
+    )
+    state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
+    assert state["status"] == "timeout"
+    assert attempts == [1]
+    assert model.calls == 1
+
+
+def test_timeout_after_price_keeps_only_verified_partial_evidence():
+    model = DelayedSequenceModel(
+        responses=[
+            (0.001, AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "NVDA"}, "id": "c1"}])),
+            (0.05, AIMessage(content=_final_json())),
+        ]
+    )
+    agent = StockMindAgent(
+        llm=model,
+        tools=build_tools(MockMarketDataProvider(seed=1)),
+        config=AgentConfig(llm_timeout_seconds=0.01, run_timeout_seconds=1.0, tool_retries=0),
+    )
+    state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
+    report = state["final_output"]
+    assert state["status"] == "timeout"
+    assert [item["tool"] for item in state["observations"]] == ["get_stock_price"]
+    assert report.key_metrics["price"] is not None
+    assert report.valuation_analysis.startswith("Unavailable")
+
+
+def test_final_structured_output_timeout_is_recorded_without_unverified_report():
+    model = DelayedSequenceModel(
+        responses=[(0.001, AIMessage(content=_final_json()))], structured_delay=0.05
+    )
+    agent = StockMindAgent(
+        llm=model,
+        tools=[],
+        config=AgentConfig(llm_timeout_seconds=0.01, run_timeout_seconds=1.0),
+    )
+    state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
+    assert state["status"] == "timeout"
+    assert state["final_output"].key_metrics == {}
+    assert any(error.startswith("llm_finalize_timeout") for error in state["errors"])

@@ -164,6 +164,18 @@ python examples/research.py --tickers AAPL --lang en
   price/history from Sina, financial statements from Eastmoney and valuation
   from Baidu (best-effort parsing).
 
+### Data-quality safeguards
+
+AkShare historical rows with missing, NaN, or non-finite OHLC values are
+discarded; they are never converted to a synthetic price of zero. A real numeric
+zero is preserved as returned by the provider. If no valid bar or latest close
+is available, the tool returns an unavailable/error result instead of fabricated
+market data. For Eastmoney balance sheets, `total_debt` uses an explicitly
+reported total when present; otherwise it is calculated only when both explicit
+short-term and long-term interest-bearing debt components are available. Partial
+debt data and total liabilities are not substituted for total debt. Offline
+fixture tests cover these cases without calling external APIs.
+
 Each report shows a **precise generation time** (`generated_at`, ISO 8601 with
 timezone), and a price/MA/volume/RSI/MACD **chart** with a dashed
 **linear-extrapolation trend** (labelled *not a prediction*) is saved to
