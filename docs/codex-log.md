@@ -400,3 +400,244 @@ StockMind 已完成：
 
 本次未执行 Commit 或 Push，没有新增 Commit ID。
 
+## 2026-11-16 — Finalize Optimization：移除冗余 LLM 报告生成
+
+日期时区：America/Los_Angeles（PST）。本条记录覆盖原始任务及用户要求继续完成的同一阶段，不覆盖此前 Cleanup-A、Cleanup-B 记录。
+
+### 用户原始 Prompt
+
+以下为原始任务完整原文；不包含真实凭据。
+
+````markdown
+# StockMind — Finalize Optimization：移除冗余 LLM 报告生成
+
+## 一、背景
+
+StockMind 已完成 P0–P1-D、Cleanup-A 和 Cleanup-B。
+
+当前完整测试基线：139 passed。
+
+此前代码审计发现，Finalize 阶段先通过 deterministic assembler 生成 grounded report，然后额外调用 LLM 生成 structured-output / JSON 候选报告，但最终仍返回 grounded report。
+
+这可能造成不必要的 LLM 成本、延迟和复杂性。
+
+本轮只优化 Finalize，不进入 P2 Evaluation。
+
+## 二、先检查当前实现
+
+检查：
+
+- `app/graph/workflow.py`
+- `app/reporting/assembler.py`
+- Finalize 相关配置
+- Observability / Tracing
+- 相关测试
+
+确认：
+
+1. 当前 Finalize LLM 候选输出是否确实不会影响最终报告。
+2. 是否存在依赖候选输出的其他有效功能。
+3. 哪些测试依赖 `llm_finalize_timeout`、structured output 或 JSON fallback。
+4. 是否存在外部接口或配置兼容性风险。
+
+如发现候选输出仍承担必要功能，不要直接删除，先报告。
+
+## 三、优化目标
+
+在确认安全的前提下：
+
+1. 移除 Finalize 中不必要的额外 LLM 调用。
+2. 直接使用 deterministic assembler 生成最终报告。
+3. 保留现有 observation 验证和 ticker 一致性检查。
+4. 保留缺失数据时的 unavailable / no-data 行为。
+5. 保留 Finalize 节点和 LangGraph 工作流结构。
+6. 保留有效的 tracing 和运行状态记录。
+7. 不再为已删除的 LLM 调用生成误导性的 timeout 或成功事件。
+8. 不改变最终报告 Schema 和金融计算语义。
+
+注意：本轮只移除 Finalize 的冗余 LLM 调用，不得删除 Agent 在研究过程中进行推理、规划和工具选择所需的 LLM 调用。
+
+## 四、兼容性处理
+
+检查并处理与旧 Finalize 路径有关的：
+
+- 配置参数
+- 超时处理
+- 异常处理
+- Trace 事件
+- 测试断言
+- 文档说明
+
+要求：
+
+1. 不要保留没有实际作用的死配置或死代码。
+2. 不要为了让测试通过而简单删除测试。
+3. 对旧行为的测试应改为验证新的正确行为。
+4. 如果公开配置需要弃用或保留兼容性，明确说明理由。
+5. 不修改无关的 State / Checkpoint 契约。
+
+## 五、测试要求
+
+增加或调整离线测试，验证：
+
+1. Finalize 不再调用额外 LLM。
+2. 研究阶段的 ReAct LLM 调用仍正常工作。
+3. 最终报告只包含经过验证的证据。
+4. 虚构价格、估值、ticker 等内容无法进入最终报告。
+5. 缺失数据时仍安全返回 unavailable / no-data。
+6. Finalize tracing 与实际执行一致。
+7. 原有超时和错误处理没有无关回归。
+8. LangGraph 工作流仍正常结束。
+
+运行完整 pytest、compileall 和 `git diff --check`。
+
+以真实测试结果为准，不要求测试数量必须恰好为 139。
+
+## 六、文档同步
+
+根据实际修改，同步更新：
+
+- `README.md`
+- `README.zh-CN.md`
+- `docs/engineering-notes.md`
+- `docs/engineering-notes.zh-CN.md`
+
+README 只保留用户需要理解的架构和功能说明。
+
+不要把详细代码清理过程堆进 README。
+
+## 七、Codex 开发日志
+
+向 `docs/codex-log.md` 追加本次记录，包含：
+
+- 日期及阶段
+- 本次完整原始 Prompt
+- 技术决策及理由
+- 修改文件
+- 测试命令和实际结果
+- 兼容性处理
+- 剩余风险
+
+保留此前 Cleanup-A、Cleanup-B 的全部历史记录，不覆盖、不编造。
+
+不得记录密钥或敏感信息。
+
+## 八、严格限制
+
+- 不增加金融分析工具。
+- 不修改 Provider 或金融计算公式。
+- 不重构 ReAct / LangGraph 主流程。
+- 不修改报告 Schema。
+- 不修改真实 `.env`。
+- 不调用外部金融 API 或付费 LLM。
+- 不进入 P2 Evaluation。
+- 不 Commit / Push。
+
+## 九、最终汇报
+
+请用中文说明：
+
+1. 原 Finalize 路径为何冗余。
+2. 删除了哪些调用、配置和代码。
+3. 保留了哪些安全机制。
+4. Tracing 和超时行为如何变化。
+5. 修改文件及测试结果。
+6. 文档和 Codex 日志是否同步。
+7. 是否存在兼容性风险。
+
+完成后停止，等待验收。
+````
+
+### 用户继续任务的完整 Prompt
+
+````markdown
+继续上次中断的 StockMind Finalize Optimization。
+
+上次因使用额度限制中断，工作区已经存在未提交的代码修改。
+
+请先检查当前 Git diff 和实际代码状态，不要重新开始，也不要覆盖已完成的修改。
+
+本轮任务：
+
+1. 检查 Finalize 冗余 LLM 调用是否已经完整移除。
+2. 完成尚未结束的回归测试修改。
+3. 确认研究阶段的 ReAct LLM 调用不受影响。
+4. 验证报告证据约束、ticker 一致性、no-data、deadline、取消传播和 checkpoint。
+5. 检查并同步 README.md、README.zh-CN.md 及中英文 engineering notes。
+6. 向 docs/codex-log.md 追加本阶段完整开发记录，保留此前所有历史内容。
+7. 运行完整 pytest、compileall 和 git diff --check。
+
+特别注意：不要为了通过测试而降低安全性，也不要修改无关模块。
+
+完成后用中文报告实际测试结果、修改文件、兼容性风险和剩余问题。
+
+不要 Commit / Push，不要进入 P2 Evaluation。
+````
+
+### Codex 处理摘要（非逐字回复）
+
+首次审查时工作树干净。收到继续指令后，再次检查了已有 Git diff，保留原有修改，并继续补齐文档、日志和验证；没有重置或覆盖已完成的实现。
+
+确认原路径冗余：`_generate_report()` 先生成 grounded/no-data 报告，再尝试 `with_structured_output(...).ainvoke(...)`。无论候选有效、无效或 JSON fallback 是否成功，返回的报告仍为 grounded；候选仅影响诊断 trace，调用超时还会将运行标为 timeout。JSON fallback 只是解析研究阶段已有文本，不是另一次 LLM 调用。搜索生产代码、测试、示例和 trace 消费者后，未发现候选承担其他必要功能。
+
+关键决策与实现：
+
+- 删除额外 structured-output 调用、JSON 候选解析、候选校验、拼接候选提示文本的辅助函数，以及仅用于该路径的 prompt。Finalize 节点直接调用现有 grounded/no-data helper；`app/reporting/assembler.py` 仅更新模块说明，没有改动组装算法。
+- 保留工具请求及观测 ticker 检查、缺失指标 unavailable、无有效观测 no-data、组装异常回退、精确 `generated_at`。保留研究 LLM 的工具绑定、消息、调用、超时和异常处理，以及所有图节点与边。
+- 每次完成的 Finalize 记录一个 `finalize` 事件，耗时对应本地组装，`token_usage` 为空，`final_status` 与节点返回状态一致。摘要改用 `report_assembly`，Web 只同步进度事件说明并删除无生产者的 fallback 分支，没有改布局或研究逻辑。
+- 保留已经发生的 timeout，不重复追加错误；组装后检查 run deadline，预算已耗尽则记录 `run_timeout`，不能因省去 LLM 调用而变为成功。不再产生 `llm_finalize_timeout` 或 `finalize_fallback`。
+- 用计数 Mock 验证实际研究调用、原生工具绑定、工具结果回传、无额外模型调用、真实 token 汇总和 checkpoint 无待执行节点。旧候选拒绝/超时测试改为验证忽略非证据内容及零额外调用，中文 prompt 测试改为验证最终中文 no-data 报告。
+- 初版新增取消测试在 Mock `_agenerate` 内主动抛出 `CancelledError`，触发了当前 LangChain 内部的 `AttributeError`，首次定向运行因此有一项失败。进一步检查本地依赖实现并复现后，改用调用方 `Task.cancel()` 测试实际取消传播，另加组装器取消不被吞掉的测试。没有修改或弱化生产取消处理，也没有修改依赖来掩盖该边界。
+
+### 配置与接口兼容性
+
+- 仓库没有独立 Finalize 配置；不删除任何仍有效的 `AgentConfig` 或环境参数。`llm_timeout_seconds` / `STOCKMIND_LLM_TIMEOUT_SECONDS` 继续约束研究 LLM。Finalize 的私有工厂不再接收无用的 llm/config 参数。
+- 删除 `FINALIZE_PROMPT`、`get_finalize_prompt()`、`_generate_report()`、`_candidate_report_is_valid()`、`_fallback_text()`。Prompt helper 未由 Agent 包导出、未在使用文档中承诺，但仓库外直接导入者需要迁移；不保留无效 shim。私有 helper 的外部调用也不再兼容。
+- Trace 消费者不能继续依赖 `final_llm_call` 标签、`finalize_fallback` 事件、候选拒绝诊断或 `llm_finalize_timeout`。保留 `finalize` 事件名和 Trace Schema；历史日志不迁移。
+- State、报告 Schema 和 checkpoint 存储契约不变。`final_report` 仍保存原始模型推理；不能将它当作已验证报告，正式输出是 `final_output`。非 timeout 运行仍按原行为在组装后标为 `finished`，既有错误保留。
+
+### 实际修改或新增的文件
+
+| 文件 | 修改内容 |
+| --- | --- |
+| [app/graph/workflow.py](../app/graph/workflow.py) | 删除候选路径，直接组装报告，保留 deadline 并记录本地 Finalize 事件 |
+| [app/agents/prompts.py](../app/agents/prompts.py) | 删除 Finalize 专用 prompt/helper，研究 prompt 不变 |
+| [app/observability/tracing.py](../app/observability/tracing.py) | 将 Finalize 摘要标为 `report_assembly`，删除旧 fallback 分支 |
+| [app/reporting/assembler.py](../app/reporting/assembler.py) | 仅更正模块说明，不改计算或证据组装逻辑 |
+| [web/app.py](../web/app.py) | 同步 Finalize 进度文字及删除旧事件分支 |
+| [tests/test_finalize.py](../tests/test_finalize.py) | 新增 12 项离线回归用例 |
+| [tests/test_workflow.py](../tests/test_workflow.py) | 更新候选 ticker 断言，加强虚构价格/估值隔离断言 |
+| [tests/test_phase3.py](../tests/test_phase3.py) | 旧 Finalize 超时测试改验零额外调用，补强已有 timeout trace 断言 |
+| [tests/test_language.py](../tests/test_language.py) | 旧 Finalize prompt 测试改验中文安全报告 |
+| [README.md](../README.md)、[README.zh-CN.md](../README.zh-CN.md) | 简要说明直接确定性组装，研究阶段仍有 LLM 推理/工具选择 |
+| [docs/engineering-notes.md](engineering-notes.md)、[docs/engineering-notes.zh-CN.md](engineering-notes.zh-CN.md) | 同步实现、追踪、兼容性、测试与取消边界 |
+| [docs/codex-log.md](codex-log.md) | 追加本阶段两个完整 Prompt 及实际开发记录 |
+
+### 实际执行命令与结果
+
+复用现有 `.venv`：Python 3.12.8、pytest 9.2.0。没有安装或升级依赖，没有调用外部金融 API 或付费 LLM。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `.venv/bin/python -m pytest tests/test_finalize.py tests/test_workflow.py tests/test_phase3.py tests/test_language.py -v`（首次） | 39 passed、1 failed；0.87 秒；2 条 pytest 缓存权限警告。失败为上述模型内部取消注入，不是 Finalize 证据或调用次数失败 |
+| 同一定向命令（修正调用方取消测试并增加本地取消用例后） | 退出码 0；41 passed；0.79 秒；1 条 pytest 缓存权限警告 |
+| `.venv/bin/python -m pytest -v` | 退出码 0；151 passed、0 failed、0 skipped；16.71 秒；1 条 pytest 缓存权限警告 |
+| `.venv/bin/python -m compileall -q app tests web`（首次沙箱运行） | 退出码 1；沙箱禁止写入部分 `__pycache__`，属于环境权限限制 |
+| `.venv/bin/python -m compileall -q app tests web`（已批准权限重试） | 退出码 0，无错误输出 |
+| `.venv/bin/python -B -`（AST 比对） | 确认研究 Agent 节点、Tools 节点及 grounded/no-data helper 与 HEAD 实现一致 |
+| `git diff --check` | 退出码 0，无空白错误 |
+
+完整套件包含原有 139 项及新增 12 项，没有通过跳过原有测试来消除失败。验证了 JSON/文本虚构价格、估值、ticker 和来源不会进入报告；错误观测不支持报告；只有价格时其他指标 unavailable；无数据时不编造；超时保留已有证据；正常研究与 checkpoint 结束正确。Web 测试仅提取并执行纯进度格式化函数，不启动 Gradio。
+
+### 剩余风险与后续建议
+
+- 仓库外对旧 prompt/helper 的直接导入，以及依赖旧 trace 标签/事件/错误的消费者，需按上述兼容性说明迁移；本轮无法核查仓库外消费者。
+- 当前 LangChain 对模型内部主动抛出 `CancelledError` 的特殊路径会先产生 `AttributeError`；研究节点的实现未变。本轮已验证调用方取消和本地组装取消传播，但没有修复上游依赖边界，也不宣称覆盖全部 Provider 的取消行为。
+- 同步本地报告组装不支持执行中抢占；deadline 会在组装结束时检查。超时后保留安全报告的行为不意味着本地计算有严格的墙钟时间硬上限。
+- 当前环境缺少 Gradio，未进行浏览器运行验证。真实 LLM、金融 Provider、成本与延迟改善均未做联网或性能测试。
+- 没有扩展 P2 或修改金融指标、Provider、报告 Schema、State/Checkpoint 契约及真实 `.env`。
+
+### Git Commit 信息
+
+本阶段未执行 Commit 或 Push，没有新增 Commit ID。
+

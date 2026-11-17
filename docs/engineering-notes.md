@@ -13,12 +13,39 @@ observations, errors, status, and run metadata. The workflow limits iterations,
 rejects tool calls whose ticker does not match the single-stock request, and
 records tool failures as observations instead of silently treating them as data.
 
-`app/reporting/assembler.py` deterministically builds the final report from
-valid observations. The workflow may attempt structured LLM output for tracing
-and validation, but candidate LLM reports never replace that result. A wrong
-ticker, unsupported metric, raw prose, or a claim without supporting
-observations is rejected. With no valid observations, the report explicitly
-states that evidence is unavailable.
+`finalize` directly calls `app/reporting/assembler.py` to build the final report
+from valid observations. There is no report-generation LLM call, structured-output
+candidate, or JSON-candidate parsing. Tool-request and observation ticker checks
+remain in place. LLM reasoning text is never used as report evidence. With no
+valid observations, the report explicitly states that evidence is unavailable;
+assembly errors still fall back to a no-data report with an explanation.
+
+### Finalize tracing and compatibility
+
+The removed path already returned the deterministic report regardless of its
+candidate. Its extra LLM call could add cost, latency, rejection diagnostics, or
+an `llm_finalize_timeout`, without improving the delivered report. No other
+in-repository feature consumed the candidate. The local JSON fallback parsed
+existing reasoning text; it was not another LLM call.
+
+- Each completed Finalize node now emits one `finalize` event measuring local
+  assembly, with the resulting run status and no LLM token usage. Trace summaries
+  label it `report_assembly`; the Web progress formatter describes deterministic
+  assembly. No new `finalize_fallback`, candidate-rejection diagnostic, or
+  `llm_finalize_timeout` is emitted.
+- There was no separate public Finalize configuration. `AgentConfig` and all
+  environment options are unchanged; `llm_timeout_seconds` still limits research
+  LLM calls. No dead compatibility configuration is retained.
+- The unused `FINALIZE_PROMPT` and `get_finalize_prompt()` were removed, along
+  with private candidate-generation helpers. The prompt helper was not exported
+  by the agent package or documented as an API, but external direct imports
+  will need updating. Trace consumers relying on the retired events or the
+  `final_llm_call` label also need updating; historical JSONL files are untouched.
+- Graph nodes/edges, report schema, State, and checkpoint contracts are unchanged.
+  `final_report` still retains raw reasoning for state compatibility; only
+  `final_output` is the evidence-based report. Existing non-timeout runs still
+  close as `finished` after report assembly, with prior errors retained; this
+  status does not guarantee that every data request succeeded.
 
 ## Runtime Safety
 
@@ -31,6 +58,21 @@ error, and return a partial or no-data report rather than invent conclusions.
 
 `asyncio.CancelledError` is re-raised; cancellation is not converted into an
 ordinary tool failure.
+
+Finalize preserves an existing `timeout` without duplicating errors. It also
+checks the remaining run deadline after local assembly and records `run_timeout`
+if the budget expired before completion. Safe partial/no-data assembly still
+runs after timeout, without starting another LLM or tool call. Synchronous
+assembly is not preemptible mid-function; this is not a hard wall-clock bound
+on local report construction.
+
+Caller task cancellation and a `CancelledError` reaching the local assembler
+are covered by regression tests. A separate fault-injection check found that
+the installed LangChain turns a model's internally raised `CancelledError`
+inside `_agenerate` into `AttributeError` before it reaches the workflow. The
+research-node code is unchanged; this dependency edge case remains outside
+the Finalize change and does not establish a cancellation guarantee for every
+provider implementation.
 
 ## Data Integrity Rules
 
@@ -240,3 +282,29 @@ not a fresh-install or deployment test. Gradio, yfinance, and AkShare are absent
 browser interaction and real-provider integration were not exercised. All
 provider tests use offline fixtures/stubs; no real financial API or paid LLM
 was called.
+
+Finalize Optimization validation (2026-11-16, existing Python 3.12.8 / pytest
+9.2.0 environment; no dependency changes):
+
+- `.venv/bin/python -m pytest tests/test_finalize.py tests/test_workflow.py tests/test_phase3.py tests/test_language.py -v`:
+  **41 passed**.
+- `.venv/bin/python -m pytest -v`: **151 passed, 0 failed, 0 skipped** (16.71 s).
+  One warning concerned sandbox permissions for the pytest cache.
+- `.venv/bin/python -m compileall -q app tests web`: passed after permission
+  was granted to write bytecode; the first attempt hit sandbox limits.
+- `git diff --check`: passed.
+
+Twelve added cases cover native tool binding and actual research LLM call counts,
+zero extra Finalize calls, token accounting, report/observation ticker mismatch,
+untrusted JSON/plain text, no-data and assembly failure, expired deadlines,
+existing timeout status, caller cancellation, local cancellation propagation,
+checkpoint completion, and bilingual progress formatting. Prior tests for
+candidate rejection, Finalize LLM timeout, and the Chinese Finalize prompt now
+verify the replacement behavior instead of being deleted. The first targeted
+run had one failing internal-cancellation injection; the caller-cancellation
+test was corrected to use `Task.cancel()`, and the dependency behavior is
+disclosed above. No production cancellation handling was weakened.
+
+Web formatter tests execute only the pure formatter; Gradio/browser operation
+remains unverified. No real financial API or paid LLM was called, and no cost or
+latency benchmark is claimed.

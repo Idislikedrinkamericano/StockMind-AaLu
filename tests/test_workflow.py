@@ -127,10 +127,13 @@ def test_hallucinated_llm_metric_is_replaced_by_grounded_observation():
     observed_price = json.loads(tool_event.tool_output)["price"]
     assert report.key_metrics["price"] == observed_price
     assert report.key_metrics["price"] != 999999.0
-    assert "999999" not in report.summary
+    assert report.key_metrics["pe"] is None
+    assert report.valuation_analysis.startswith("Unavailable")
+    assert "999999" not in report.model_dump_json()
+    assert "invented price" not in report.model_dump_json()
 
 
-def test_wrong_llm_report_ticker_is_rejected_and_state_ticker_is_preserved():
+def test_wrong_llm_report_ticker_is_ignored_and_state_ticker_is_preserved():
     agent = _make_agent(
         [
             AIMessage(content="", tool_calls=[{"name": "get_stock_price", "args": {"ticker": "NVDA"}, "id": "c1"}]),
@@ -139,7 +142,9 @@ def test_wrong_llm_report_ticker_is_rejected_and_state_ticker_is_preserved():
     )
     report = agent.invoke("Analyze NVDA", ticker="NVDA")
     assert report.ticker == "NVDA"
-    assert any("report ticker" in (event.error or "") for event in agent.tracer.events)
+    assert report.key_metrics["price"] is not None
+    assert "AMD" not in report.model_dump_json()
+    assert all(event.error is None for event in agent.tracer.events)
 
 
 def test_wrong_tool_ticker_is_blocked_in_single_stock_mode():

@@ -1,8 +1,8 @@
 """Deterministic, evidence-grounded report assembly.
 
-The workflow uses this assembler for final reports even when a structured LLM
-candidate is available. Reports use valid tool observations and disclose missing
-evidence; with no usable observations, the workflow supplies a no-data report.
+The workflow uses this assembler directly, with no report-generation LLM call.
+Reports use valid tool observations and disclose missing evidence; with no
+usable observations, the workflow supplies a no-data report.
 """
 
 from __future__ import annotations

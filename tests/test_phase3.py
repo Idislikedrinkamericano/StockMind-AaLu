@@ -23,7 +23,7 @@ class DelayedSequenceModel(BaseChatModel):
 
     responses: list[tuple[float, AIMessage]]
     calls: int = 0
-    structured_delay: float | None = None
+    structured_calls: int = 0
 
     @property
     def _llm_type(self) -> str:
@@ -39,17 +39,8 @@ class DelayedSequenceModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
     def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
-        if self.structured_delay is None:
-            raise NotImplementedError
-
-        delay = self.structured_delay
-
-        class SlowStructuredOutput:
-            async def ainvoke(self, messages: list[BaseMessage]) -> StockResearchReport:
-                await asyncio.sleep(delay)
-                return StockResearchReport(ticker="NVDA", summary="late", conclusion="late")
-
-        return SlowStructuredOutput()
+        self.structured_calls += 1
+        raise AssertionError("Finalize must not request structured LLM output")
 
 
 def _final_json(ticker="NVDA"):
@@ -178,6 +169,9 @@ def test_llm_call_timeout_returns_safe_no_data_report():
     assert state["observations"] == []
     assert "no evidence" in state["final_output"].summary.lower()
     assert any(error.startswith("llm_timeout") for error in state["errors"])
+    assert model.calls == 1
+    assert model.structured_calls == 0
+    assert [e.final_status for e in agent.tracer.events if e.event_type == "finalize"] == ["timeout"]
 
 
 def test_run_deadline_stops_slow_tool_before_another_agent_step():
@@ -259,18 +253,24 @@ def test_timeout_after_price_keeps_only_verified_partial_evidence():
     assert [item["tool"] for item in state["observations"]] == ["get_stock_price"]
     assert report.key_metrics["price"] is not None
     assert report.valuation_analysis.startswith("Unavailable")
+    assert model.calls == 2
+    assert model.structured_calls == 0
+    assert [e.final_status for e in agent.tracer.events if e.event_type == "finalize"] == ["timeout"]
 
 
-def test_final_structured_output_timeout_is_recorded_without_unverified_report():
-    model = DelayedSequenceModel(
-        responses=[(0.001, AIMessage(content=_final_json()))], structured_delay=0.2
-    )
+def test_finalize_skips_structured_output_without_creating_a_false_timeout():
+    model = DelayedSequenceModel(responses=[(0.001, AIMessage(content=_final_json()))])
     agent = StockMindAgent(
         llm=model,
         tools=[],
         config=AgentConfig(llm_timeout_seconds=0.05, run_timeout_seconds=1.0),
     )
     state = asyncio.run(agent.arun("Analyze NVDA", ticker="NVDA"))
-    assert state["status"] == "timeout"
+    assert state["status"] == "finished"
     assert state["final_output"].key_metrics == {}
-    assert any(error.startswith("llm_finalize_timeout") for error in state["errors"])
+    assert "no evidence" in state["final_output"].summary.lower()
+    assert state["errors"] == []
+    assert model.calls == 1
+    assert model.structured_calls == 0
+    assert [e.final_status for e in agent.tracer.events if e.event_type == "finalize"] == ["finished"]
+    assert all(e.event_type != "finalize_fallback" for e in agent.tracer.events)

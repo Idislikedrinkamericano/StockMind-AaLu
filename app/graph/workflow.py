@@ -3,7 +3,7 @@
 Nodes:
   agent     -> LLM reasons and either emits tool calls or a final answer.
   tools     -> Executes tool calls concurrently with timeout + retry + backoff.
-  finalize  -> Produces a validated :class:`StockResearchReport`.
+  finalize  -> Assembles :class:`StockResearchReport` from valid observations.
 
 The loop is bounded by ``max_iterations``. Tool failures are recorded as
 observations rather than crashing the run (graceful degradation). The graph is
@@ -22,11 +22,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
 
-from app.agents.prompts import get_finalize_prompt, get_system_prompt
+from app.agents.prompts import get_system_prompt
 from app.graph.state import StockAgentState
 from app.observability.tracing import TraceCollector
 from app.reporting.assembler import build_grounded_report
@@ -389,16 +389,6 @@ def _make_tools_node(
     return tools_node
 
 
-def _fallback_text(state: StockAgentState) -> str:
-    observations = state.get("observations", [])
-    if not observations:
-        return "No tool observations were collected before the run ended."
-    lines = [f"Collected {len(observations)} tool observation(s):"]
-    for obs in observations:
-        lines.append(f"- {obs['tool']}: {obs['result']}")
-    return "\n".join(lines)
-
-
 def _no_data_report(ticker: str, language: str, errors: list[str]) -> StockResearchReport:
     """Honest report when no tool observation was collected (e.g. all tools failed)."""
     if language == "zh":
@@ -426,31 +416,6 @@ def _no_data_report(ticker: str, language: str, errors: list[str]) -> StockResea
     )
 
 
-def _candidate_report_is_valid(
-    candidate: StockResearchReport,
-    state: StockAgentState,
-    grounded: StockResearchReport | None,
-) -> tuple[bool, str | None]:
-    """Validate the parts of an LLM report that can be checked mechanically.
-
-    Free-form prose cannot be reliably fact-checked by string inspection. The
-    final result is therefore always the deterministic ``grounded`` report;
-    this validation records why a candidate was rejected and prevents a wrong
-    ticker or unobserved numeric metric from being accepted as authoritative.
-    """
-    expected_ticker = _infer_ticker(state)
-    if candidate.ticker.upper() != expected_ticker:
-        return False, f"report ticker {candidate.ticker!r} does not match {expected_ticker!r}"
-    if grounded is None:
-        return False, "no valid tool observations support the report"
-
-    expected_metrics = grounded.key_metrics
-    for key, value in candidate.key_metrics.items():
-        if key not in expected_metrics or expected_metrics[key] != value:
-            return False, f"report metric {key!r} is not supported by tool observations"
-    return True, None
-
-
 def _grounded_or_no_data_report(state: StockAgentState, ticker: str) -> StockResearchReport:
     """Return only a report assembled from valid observations, or an honest no-data report."""
     try:
@@ -463,86 +428,27 @@ def _grounded_or_no_data_report(state: StockAgentState, ticker: str) -> StockRes
     return _no_data_report(ticker, state.get("language", "en"), state.get("errors", []))
 
 
-async def _generate_report(
-    llm: BaseChatModel, state: StockAgentState, tracer: TraceCollector, config: AgentConfig
-) -> tuple[StockResearchReport, str | None]:
-    ticker = _infer_ticker(state)
-    final_report = state.get("final_report") or _fallback_text(state)
-
-    grounded = _grounded_or_no_data_report(state, ticker)
-    if state.get("status") == "timeout":
-        return grounded, None
-    start = time.perf_counter()
-    # 1) Validate an optional structured LLM candidate; return the grounded report.
-    try:
-        structured_llm = llm.with_structured_output(StockResearchReport)
-        messages: list[BaseMessage] = [
-            SystemMessage(content=get_finalize_prompt(state.get("language", "en"))),
-            *list(state.get("messages", [])),
-            HumanMessage(content=f"Final reasoning so far:\n{final_report}"),
-        ]
-        report = await asyncio.wait_for(
-            structured_llm.ainvoke(messages), timeout=_bounded_timeout(config.llm_timeout_seconds, state)
-        )
-        if not isinstance(report, StockResearchReport):
-            raise TypeError(f"Structured output returned {type(report).__name__}, not StockResearchReport")
-        valid, reason = _candidate_report_is_valid(report, state, grounded if state.get("observations") else None)
+def _make_finalize_node(tracer: TraceCollector):
+    async def finalize_node(state: StockAgentState) -> dict[str, Any]:
+        start = time.perf_counter()
+        report = _grounded_or_no_data_report(state, _infer_ticker(state))
+        report = report.model_copy(update={"generated_at": _precise_now_iso()})
+        status = "timeout" if state.get("status") == "timeout" else "finished"
+        updates: dict[str, Any] = {"final_output": report, "status": status}
+        error = None
+        # Safe local assembly still runs after a timeout. Never turn an expired
+        # run into success merely because no additional LLM call is needed.
+        remaining = _remaining_run_seconds(state)
+        if status != "timeout" and remaining is not None and remaining <= 0:
+            error = _timeout_error("run_timeout")
+            updates["errors"] = state.get("errors", []) + [error]
+            updates["status"] = "timeout"
         tracer.record(
             event_type="finalize",
             latency_ms=(time.perf_counter() - start) * 1000.0,
-            final_status="finished",
-            error=None if valid else f"LLM report rejected: {reason}",
-        )
-        return grounded, None
-    except asyncio.CancelledError:
-        raise
-    except TimeoutError:
-        error = _timeout_error(
-            "run_timeout" if (_remaining_run_seconds(state) or 0.0) <= 0 else "llm_finalize_timeout"
-        )
-        tracer.record(
-            event_type="finalize_fallback",
-            latency_ms=(time.perf_counter() - start) * 1000.0,
+            final_status=updates["status"],
             error=error,
-            final_status="timeout",
         )
-        return grounded, error
-    except Exception as exc:
-        tracer.record(
-            event_type="finalize_fallback",
-            latency_ms=(time.perf_counter() - start) * 1000.0,
-            tool_output=(
-                f"Structured output unavailable ({type(exc).__name__}); "
-                "fell back to JSON/text report."
-            ),
-        )
-
-    # 2) A final LLM message may already be JSON; the scripted demo uses a marker.
-    # JSON/schema validity is not evidence validity.
-    try:
-        candidate = StockResearchReport.model_validate_json(final_report)
-        valid, reason = _candidate_report_is_valid(candidate, state, grounded if state.get("observations") else None)
-        if not valid:
-            tracer.record(event_type="finalize_fallback", error=f"LLM JSON report rejected: {reason}")
-        return grounded, None
-    except Exception:
-        pass
-
-    # 3) Raw LLM prose is never used as a financial report: it cannot be
-    # mechanically grounded. Return the deterministic/no-data result instead.
-    return grounded, None
-
-
-def _make_finalize_node(llm: BaseChatModel, tracer: TraceCollector, config: AgentConfig):
-    async def finalize_node(state: StockAgentState) -> dict[str, Any]:
-        report, timeout_error = await _generate_report(llm, state, tracer, config)
-        report = report.model_copy(update={"generated_at": _precise_now_iso()})
-        updates: dict[str, Any] = {"final_output": report}
-        if timeout_error:
-            updates["errors"] = state.get("errors", []) + [timeout_error]
-            updates["status"] = "timeout"
-        elif state.get("status") != "timeout":
-            updates["status"] = "finished"
         return updates
 
     return finalize_node
@@ -573,7 +479,7 @@ def build_agent_graph(
     graph = StateGraph(StockAgentState)
     graph.add_node("agent", _make_agent_node(llm, tools, config, tracer))
     graph.add_node("tools", _make_tools_node(tools, config, tracer))
-    graph.add_node("finalize", _make_finalize_node(llm, tracer, config))
+    graph.add_node("finalize", _make_finalize_node(tracer))
 
     graph.set_entry_point("agent")
     graph.add_conditional_edges(

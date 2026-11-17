@@ -1,7 +1,7 @@
-"""Prompts for the ReAct agent and the final structured-output step.
+"""Prompts for the research-stage ReAct agent.
 
-Prompts are language-aware: the same English contract is used for structured
-output, while the language directive tells the model which language to write in.
+The shared research contract includes a language directive. Final report
+assembly is deterministic and does not need an LLM prompt.
 """
 
 SYSTEM_PROMPT = """\
@@ -24,16 +24,6 @@ Hard rules:
     uncertainty in your final answer.
 """
 
-FINALIZE_PROMPT = """\
-You are converting a completed research session into a structured report.
-Produce a StockResearchReport from the conversation below.
-
-Only include facts that are grounded in the tool observations. Do not invent
-metrics or news. Mark anything you are unsure about in the "uncertainty" field.
-For analysis sections that this session did not cover, use the exact text
-"Not covered in this phase." rather than guessing.
-"""
-
 LANGUAGE_INSTRUCTIONS = {
     "en": "Respond in English.",
     "zh": "始终使用简体中文回答，包括所有分析文字与最终报告内容。",
@@ -43,8 +33,3 @@ LANGUAGE_INSTRUCTIONS = {
 def get_system_prompt(language: str = "en") -> str:
     instruction = LANGUAGE_INSTRUCTIONS.get(language, LANGUAGE_INSTRUCTIONS["en"])
     return f"{SYSTEM_PROMPT}\n\nLanguage requirement: {instruction}"
-
-
-def get_finalize_prompt(language: str = "en") -> str:
-    instruction = LANGUAGE_INSTRUCTIONS.get(language, LANGUAGE_INSTRUCTIONS["en"])
-    return f"{FINALIZE_PROMPT}\n\nLanguage requirement: {instruction}"

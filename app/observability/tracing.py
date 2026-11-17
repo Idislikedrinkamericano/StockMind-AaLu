@@ -121,9 +121,7 @@ class TraceCollector:
             elif event.event_type == "tool_result":
                 continue
             elif event.event_type == "finalize":
-                label = "final_llm_call"
-            elif event.event_type == "finalize_fallback":
-                label = "finalize_fallback"
+                label = "report_assembly"
             elif event.event_type == "run_end":
                 label = f"run_end (status={event.final_status})"
             else:

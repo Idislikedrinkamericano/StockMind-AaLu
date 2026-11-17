@@ -16,7 +16,9 @@ behind a prebuilt abstraction. State, tool observations, execution limits, and
 failures are therefore visible and testable.
 
 Final report facts and metrics are assembled only from valid tool observations.
-LLM prose or schema-valid JSON is not evidence on its own.
+Finalize uses the deterministic assembler directly, with no additional LLM call.
+Research-stage LLM reasoning and tool selection remain active; LLM prose or
+schema-valid JSON is not evidence on its own.
 
 ## Features
 

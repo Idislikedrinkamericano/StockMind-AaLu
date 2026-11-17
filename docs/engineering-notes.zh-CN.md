@@ -11,10 +11,29 @@
 工作流限制迭代次数，拒绝 ticker 与单股票请求不一致的工具调用，并将工具失败记录为观测
 结果，而不是悄悄当成数据处理。
 
-`app/reporting/assembler.py` 仅从有效观测结果确定性地构建最终报告。工作流可能会尝试
-结构化 LLM 输出以用于追踪和校验，但 LLM 候选报告永远不会替换该结果。ticker 错误、不受
-观测支持的指标、原始文本，以及没有支持观测的结论都会被拒绝。没有有效观测结果时，报告
-会明确说明证据不可用。
+`finalize` 直接调用 `app/reporting/assembler.py`，仅从有效观测结果构建最终报告。
+不再调用报告生成 LLM、创建 structured-output 候选或解析 JSON 候选。工具请求和观测
+结果的 ticker 检查保持不变。LLM 推理文本不作为报告证据。没有有效观测时，报告明确
+说明证据不可用；组装异常时仍返回附带原因的 no-data 报告。
+
+### Finalize 追踪与兼容性
+
+旧路径无论候选内容如何，都返回确定性报告。额外 LLM 调用只可能增加成本、延迟、拒绝
+诊断或 `llm_finalize_timeout`，不会改善最终交付的报告。仓库内没有其他功能消费候选
+报告。原 JSON fallback 只解析已有推理文本，并非另一次 LLM 调用。
+
+- 每个完成的 Finalize 节点产生一个 `finalize` 事件，记录本地组装耗时、运行结束状态，
+  不计 LLM token。Trace 摘要标为 `report_assembly`，Web 进度文案说明确定性组装。
+  不再产生新的 `finalize_fallback`、候选拒绝诊断或 `llm_finalize_timeout`。
+- 原先没有独立的公开 Finalize 配置。`AgentConfig` 和环境变量均保持不变；
+  `llm_timeout_seconds` 继续约束研究阶段的 LLM 调用，没有保留无效兼容配置。
+- 删除了无调用的 `FINALIZE_PROMPT`、`get_finalize_prompt()` 和候选生成私有辅助函数。
+  Prompt helper 未从 Agent 包导出，也未作为 API 写入文档，但仓库外直接导入者需要
+  调整。依赖已移除事件或 `final_llm_call` 标签的 trace 消费者也需调整；历史 JSONL
+  文件不修改。
+- 图节点/边、报告 Schema、State 和 checkpoint 契约保持不变。`final_report` 仍保留
+  原始推理以兼容 State；只有 `final_output` 是基于证据的报告。非 timeout 运行在报告
+  组装后仍按既有行为关闭为 `finished`，保留此前错误；该状态不保证所有数据请求成功。
 
 ## 运行时安全
 
@@ -24,6 +43,16 @@
 观测结果、记录超时错误，并返回部分数据或无数据报告，而不是编造结论。
 
 `asyncio.CancelledError` 会被重新抛出；取消不会被转化为普通工具失败。
+
+Finalize 保留已有 `timeout`，不重复添加错误；本地组装后也会检查剩余运行预算，若
+结束前已到 deadline，则记录 `run_timeout`。超时后仍可安全组装部分数据或 no-data
+报告，不再启动 LLM 或工具调用。同步组装无法在函数执行中被抢占，因此本地报告构建
+并不具备严格的墙钟时间硬上限。
+
+回归测试覆盖调用方取消任务，以及到达本地组装器的 `CancelledError` 传播。另一次
+故障注入发现：当前安装的 LangChain 会把模型在 `_agenerate` 内主动抛出的
+`CancelledError` 转为 `AttributeError`，之后才到达工作流。研究节点代码未改动；此
+依赖边界仍在本轮 Finalize 范围之外，不能据此保证所有 Provider 的取消实现都可靠。
 
 ## 数据完整性规则
 
@@ -195,3 +224,24 @@ Cleanup-B 离线验证（2026-11-16，复用现有 Python 3.12.8 环境；未安
 `.[web]` requirements 入口。这不是全新环境安装或部署测试。环境缺少 Gradio、
 yfinance 和 AkShare，未验证浏览器交互或真实 Provider 集成。Provider 测试均使用
 离线 fixture/stub，未调用真实金融 API 或付费 LLM。
+
+Finalize Optimization 验证（2026-11-16，复用现有 Python 3.12.8 / pytest 9.2.0
+环境；未修改依赖）：
+
+- `.venv/bin/python -m pytest tests/test_finalize.py tests/test_workflow.py tests/test_phase3.py tests/test_language.py -v`：
+  **41 passed**。
+- `.venv/bin/python -m pytest -v`：**151 passed、0 failed、0 skipped**（16.71 秒）。
+  一条警告涉及沙箱内 pytest 缓存写入权限。
+- `.venv/bin/python -m compileall -q app tests web`：允许写入字节码后通过；
+  首次尝试受到沙箱权限限制。
+- `git diff --check`：通过。
+
+新增十二个用例覆盖原生工具绑定及实际研究 LLM 调用次数、Finalize 零额外调用、token
+统计、报告/观测 ticker 不匹配、不可信 JSON/文本、no-data 与组装异常、过期 deadline、
+已有 timeout 状态、调用方取消、本地取消传播、checkpoint 结束和双语进度格式。原先
+验证候选拒绝、Finalize LLM 超时和中文 Finalize prompt 的测试均改为验证新行为，没有
+直接删除。首次定向测试有一项内部取消注入失败；调用方取消测试改为真实的
+`Task.cancel()`，依赖行为已在上文披露。没有降低生产代码的取消处理要求。
+
+Web 测试只执行纯进度格式化函数，Gradio/浏览器运行仍未验证。未调用真实金融 API 或
+付费 LLM，未宣称成本或延迟 benchmark。

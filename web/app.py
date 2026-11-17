@@ -97,9 +97,7 @@ def describe_event(etype, kw, lang):
         base = f"🔧 调用工具 `{name}`{lat_s}" if zh else f"🔧 Tool `{name}`{lat_s}"
         return base + (" ⚠️ 出错" if err else "")
     if etype == "finalize":
-        return "📝 生成研报" if zh else "📝 Finalizing report"
-    if etype == "finalize_fallback":
-        return "📝 生成研报（确定性组装）" if zh else "📝 Finalizing report (deterministic assembly)"
+        return "📝 组装研报（确定性）" if zh else "📝 Assembling report (deterministic)"
     if etype == "run_end":
         status = kw.get("final_status", kw.get("status", ""))
         ok = "✅ 完成" if zh else "✅ Done"
