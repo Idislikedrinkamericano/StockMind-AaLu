@@ -1,0 +1,15 @@
+{
+  "version": "synthetic-v1",
+  "source": "mock/fixture-v1",
+  "note": "Fixed synthetic test inputs only; not historical or live market data. All dates and financial figures are fixture values.",
+  "timestamp": "2025-01-31T00:00:00+00:00",
+  "period_end": "2024-12-31",
+  "published_at": "2025-01-15",
+  "close_offsets": [-10, -9, -11, -8, -7, -9, -6, -5, -7, -4, -3, -5, -2, -1, -3, 0, 1, -1, 2, 3, 1, 4, 5, 3, 6, 4, 2, 5, 3, 1, 4, 2, 0, 3, 1, -1, 2, 1, -1, 0],
+  "symbols": {
+    "NVDA": {"price": 100.0, "eps": 5.0, "shares": 20.0},
+    "AMD": {"price": 50.0, "eps": 2.5, "shares": 40.0},
+    "TSM": {"price": 80.0, "eps": 4.0, "shares": 25.0}
+  },
+  "financials": {"revenue": 1000.0, "net_income": 100.0, "ebitda": 200.0, "free_cash_flow": 80.0, "total_debt": 200.0, "cash": 100.0, "market_cap": 2000.0}
+}

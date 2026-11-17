@@ -216,9 +216,135 @@ one-shot and normal error handling is unchanged.
 
 ## Evaluation and Prompt Journal
 
-`examples/evaluate.py` and `app/evaluation/` provide a local evaluation
-harness. The repository publishes no benchmark or performance claim: results
-depend on the model, provider, fixtures, and run configuration.
+### Audit of the previous evaluator
+
+The existing sequential Runner, ticker-to-agent factory, `arun()` state, and
+`TraceCollector` were reusable. Three unversioned questions already existed,
+but had no case IDs, scenario definitions, or output constraints. A supplied
+real agent could be executed, but the old CLI automatically enabled real LLMs
+when credentials were present; its default demo did not select tools dynamically.
+
+Only latency and available token metadata were actual execution measurements.
+Cost used approximate pricing. “Tool selection accuracy” was recall alone and
+counted requested/observed tools, including rejected requests. Grounding only
+checked for a nonempty source list. Numerical accuracy checked price alone and
+passed when the provider was absent or lookup failed; it could fetch data again
+during scoring. Quality measured populated sections, even when they said
+unavailable. Report existence, finished status and a nonempty summary were not
+sufficient completion criteria. These optimistic proxies are no longer reported.
+
+### Dataset and execution
+
+[questions.json](../app/evaluation/datasets/questions.json) is now the validated
+`stockmind-eval-v1` object, with 12 cases and a `synthetic-v1` fixture version.
+Each case declares a unique ID, question, ticker, scenario, expected executed
+tools, output constraints, and a separate fixed script. Scripts are not generated
+from expected-tool labels during evaluation. Names and arguments are checked
+against the existing tool registry and Pydantic input schemas.
+
+| Cases | Coverage |
+| --- | --- |
+| price-nvda, trend-amd | Current price and fixed historical window |
+| technicals-tsm, risk-amd | MA/RSI/MACD and volatility/drawdown |
+| financials-nvda, valuation-tsm | Statements, P/E, simplified EV/EBITDA, reported FCF yield |
+| combined-amd | Price, income, valuation and news together |
+| missing-financials, news-failure, no-price-data | Missing income/cash-flow figures, failed news, failed sole price source |
+| wrong-tool-ticker, wrong-observation-ticker | Blocked cross-ticker request, rejected cross-ticker evidence and unsupported LLM claims |
+
+[fixtures-v1.json](../app/evaluation/datasets/fixtures-v1.json) contains explicitly
+synthetic values/dates for NVDA, AMD and TSM. The evaluation-only adapter feeds
+these through existing production tools; it changes no production provider or
+formula. History always contains the same 40 synthetic daily bars, not a live
+lookback window. This dataset does not cover every tool or DCF scenario.
+
+`Evaluator()` uses a fresh scripted model, explicit fixture tools, in-memory
+checkpointer and tracer for every case, and runs cases and scripted calls in
+fixed order. It does not load `.env`, mutate environment settings, select an
+external provider, or enable network tracing. No new tracing implementation was
+added. Uncaught per-case exceptions produce failed results and the batch
+continues; cancellation propagates. Factory callers remain responsible for
+fresh agents and data/model access; injected factories are labelled
+`custom-factory-unverified`, never `offline-scripted`.
+
+### Metrics and denominators
+
+- **Tool selection:** let E be unique expected names and A be unique names in
+  actual `tool_call` trace events. Precision = |E ∩ A| / |A|, Recall = |E ∩ A| / |E|,
+  F1 = 2PR / (P + R). Both empty yields 1/1/1; exactly one empty yields 0/0/0.
+  Duplicate attempts do not change set scores. Failed executions count as tool
+  attempts; rejected requests do not. Requested names are output separately.
+  These scores do not assess arguments, autonomous reasoning or financial truth.
+- **Task completion:** requires a report, `finished`, passing evidence checks,
+  execution of required tools, and all declared output/error constraints.
+  Constraints include finite required metrics, expected fixture values (relative
+  tolerance 1e-9 / absolute tolerance 1e-12), absent metrics, available/unavailable
+  sections, exact expected error count, error text, and forbidden claims. Extra
+  tools reduce precision separately. A no-data result does not pass an ordinary
+  price task, but can pass an explicitly specified safe-failure task.
+- **Evidence grounding:** reuses the workflow's grounded/no-data helper and
+  compares the report against assembly from that run's observations. Ticker,
+  full metrics/provenance, narrative fields and finite numbers are checked;
+  only `generated_at` is excluded. Unsupported values or prose fail. Honest
+  no-data output can pass. This is deterministic output consistency, not an
+  independent oracle: shared assembler bugs or inaccurate source data can pass.
+- **Execution:** tool call count counts recorded `tool_call` attempts; request
+  count includes blocked/duplicate requests. Error count is the state error list
+  length, avoiding duplicate trace errors. Latency uses the measured `run_end`
+  trace duration; failures without it use Runner elapsed time including setup,
+  with `latency_source` disclosed. Counts are derived from existing records;
+  they are not independent instrumentation of every provider request. In
+  particular, the existing trace may omit an in-flight deadline cancellation.
+- **Aggregation:** unweighted arithmetic mean of per-case Precision, Recall and
+  F1; completion/grounding rates divide passing cases by **all cases**, including
+  Runner failures and safe-failure scenarios. Latency uses the same denominator;
+  tool/error totals are sums. No case is silently removed from the denominator.
+
+### Running and reproducing the baseline
+
+```bash
+python examples/evaluate.py --output /tmp/stockmind-evaluation.json
+python examples/evaluate.py --lang zh   # JSON to stdout; no .env loading
+```
+
+JSON includes dataset/fixture versions and hashes, runtime package versions,
+case IDs, expected/actual/requested tools, trace-derived calls, report,
+observations, all checks, execution metrics, failure reasons and aggregation
+rules. Dataset JSON files are included as package data; no dependency was added.
+Input values, ordering and decisions are reproducible in the recorded runtime.
+Latency, report generation times and observation retrieval timestamps vary;
+raw JSON is not promised to be byte-identical. Tests compare stable scores,
+counts and reports excluding generation time across two runs.
+
+Compatibility: the unversioned question-list API is replaced by `load_dataset()`
+and `EvaluationDataset`. `Evaluator(agent_factory)` still accepts a ticker-to-agent
+factory, but consumes the new dataset model. `RunMetrics`/`EvaluationReport` now
+use serializable Pydantic models. Old quality/numerical-accuracy/recall-labelled-
+accuracy helpers are removed; consumers should read the explicit checks and
+`aggregate` fields. The CLI never auto-enables live APIs and has no live-mode flag.
+
+P2-A validation (2026-11-17, existing Python 3.12.8 / pytest 9.2.0):
+
+- `.venv/bin/python examples/evaluate.py --output /tmp/stockmind-p2-a-baseline.json`:
+  12/12 completed, 12/12 grounding-consistent; macro P/R/F1 = 1.0;
+  25 recorded tool attempts, 3 expected scenario errors, all final statuses
+  `finished`. The final measured run averaged 11.32 ms per Agent run; this is a local
+  timing observation, not a performance benchmark or cost claim.
+- `.venv/bin/python -m pytest tests/test_evaluation.py -v`: **34 passed**.
+- `.venv/bin/python -m pytest -v`: **182 passed, 0 failed, 0 skipped** (13.42 s).
+  One warning concerned sandbox permissions for the pytest cache.
+- `.venv/bin/python -m compileall -q app tests examples`: passed after permission
+  was granted for bytecode writes; the initial sandbox attempt was denied.
+- `git diff --check`: passed.
+
+Tests include schema rejection, empty/duplicate tool sets, extra/missing tools,
+independent repeated runs, hostile environment settings with network access
+blocked, corrupted report evidence, no-data completion rules, failed cases in
+the denominator, cancellation and JSON output. The original Workflow tests
+remain in the full suite. High scripted scores validate plumbing and rules;
+they do not measure real LLM tool choice, research quality, live provider
+reliability or financial correctness. No LLM-as-Judge or P2-B/P2-C work is included.
+
+### Prompt journal
 
 `promptlog/` is a separate local prompt-recording utility:
 

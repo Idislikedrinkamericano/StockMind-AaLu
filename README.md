@@ -150,6 +150,18 @@ Use the research CLI above for a real LLM agent. Platforms requiring a
 requirements file can run `pip install -r requirements.txt` from the repository
 root; that file delegates to `.[web]`.
 
+### Offline Evaluation
+
+```bash
+python examples/evaluate.py --output /tmp/stockmind-evaluation.json
+```
+
+Runs 12 versioned cases with fixed synthetic fixtures and scripted LLM responses,
+regardless of API keys or provider settings. JSON includes tool-set Precision /
+Recall / F1, rule-based completion, report/observation consistency, and execution
+metrics. These are regression checks, not real-LLM performance or independent
+financial accuracy. See the [metric definitions and limits](docs/engineering-notes.md#evaluation-and-prompt-journal).
+
 ## Tech Stack
 
 - Python 3.11+

@@ -167,8 +167,107 @@ ID，从而避免复用耗尽的一次性迭代器，同时保留 checkpoint 消
 
 ## 评估与 Prompt 记录
 
-`examples/evaluate.py` 和 `app/evaluation/` 提供本地实验用的评估框架。仓库不发布
-benchmark，也不做性能承诺；结果取决于模型、Provider、fixture 和运行配置。
+### 原有评估审计
+
+既有顺序 Runner、ticker-to-agent factory、`arun()` State 和 `TraceCollector` 可以
+复用。原有三条未版本化题目没有 Case ID、场景定义或输出约束。注入真实 Agent 可以
+执行研究，但旧 CLI 会因存在凭据自动启用真实 LLM；默认 Demo 本身没有动态工具选择。
+
+实际测量主要是耗时和模型提供的 token 元数据，成本使用近似单价。“工具选择准确率”
+实际只有 recall，而且将请求/观测工具都计入，包括被拒绝的请求。Grounding 只检查来源
+列表非空；数值准确率只比较价格，缺少 Provider 或取值失败还会通过，并可能在评分时
+再次取数。质量分只是章节填充率，unavailable 文本也能得分。有报告、finished 和非空
+摘要不足以证明任务完成。本轮不再输出这些过于乐观的近似分数。
+
+### 数据集与执行
+
+[questions.json](../app/evaluation/datasets/questions.json) 现在是经过校验的
+`stockmind-eval-v1` 对象，包含 12 个案例及 `synthetic-v1` fixture 版本。每个案例明确
+唯一 ID、问题、ticker、场景、预期执行工具、输出约束和独立的固定脚本。运行时不会根据
+预期工具标签生成脚本。工具名和参数使用现有工具注册表及 Pydantic 输入 Schema 校验。
+
+| 案例 | 覆盖内容 |
+| --- | --- |
+| price-nvda、trend-amd | 当前价格与固定历史窗口 |
+| technicals-tsm、risk-amd | MA/RSI/MACD 及波动率/回撤 |
+| financials-nvda、valuation-tsm | 财报、P/E、简化 EV/EBITDA、已报告 FCF 收益率 |
+| combined-amd | 价格、利润表、估值和新闻组合 |
+| missing-financials、news-failure、no-price-data | 利润/现金流缺失、新闻失败、唯一价格源失败 |
+| wrong-tool-ticker、wrong-observation-ticker | 跨 ticker 请求拒绝、错误 ticker 观测和无依据 LLM 结论隔离 |
+
+[fixtures-v1.json](../app/evaluation/datasets/fixtures-v1.json) 为 NVDA、AMD、TSM 提供
+明确标记为合成数据的数值和日期。仅供评估的适配器将其送入现有生产工具，没有修改生产
+Provider 或公式。历史数据始终是固定的 40 根合成日线，不代表实时查询窗口。本数据集
+尚未覆盖全部工具或 DCF 场景。
+
+`Evaluator()` 为每个案例创建全新的脚本模型、显式 fixture 工具、内存 checkpoint 与
+tracer，按固定案例和工具顺序执行。不加载 `.env`、修改环境变量、选择外部 Provider 或
+启用网络 tracing，也没有重写 Tracing。案例内未捕获异常会记为失败结果，继续后续案例；
+取消会传播。注入 factory 的调用者负责提供独立 Agent 并控制数据/模型访问，其结果标为
+`custom-factory-unverified`，不会标成 `offline-scripted`。
+
+### 指标与分母
+
+- **工具选择**：E 为预期工具名称集合，A 为实际 `tool_call` trace 事件中的工具名称
+  集合。Precision = |E ∩ A| / |A|，Recall = |E ∩ A| / |E|，F1 = 2PR / (P + R)。
+  两集合均空时为 1/1/1；仅一方为空时为 0/0/0。重复尝试不改变集合得分。执行失败仍算
+  工具尝试，被拒绝的请求不算；请求名称单独输出。这些分数不评价参数、自主推理或金融事实。
+- **任务完成**：要求有效报告、`finished`、证据检查通过、必要工具已执行，且满足全部
+  输出/错误约束。约束包括有限的必需指标、fixture 预期值（相对容差 1e-9、绝对容差
+  1e-12）、缺失指标、可用/不可用章节、精确预期错误数、错误文本及禁止出现的结论。
+  多余工具由 precision 单独惩罚。no-data 不能完成普通价格查询，但可完成明确指定的
+  安全失败处理案例。
+- **证据 grounding**：复用工作流 grounded/no-data helper，从本次 observations 重建
+  期望报告，校验 ticker、完整指标/来源、叙述字段与有限数值，仅忽略 `generated_at`。
+  无依据数值或文本会失败，诚实 no-data 可以通过。这是确定性输出一致性检查，不是独立
+  真值验证；组装器共有缺陷或不准确源数据仍可能通过。
+- **执行指标**：tool call count 统计已记录的 `tool_call` 尝试；请求数包含被拒绝或
+  去重的请求。Error count 是 State 错误列表长度，不重复累计 trace 错误。Latency
+  使用实际 `run_end` trace 耗时；缺少该事件的异常使用包含初始化的 Runner 耗时，并
+  标记 `latency_source`。次数由既有记录推导，不是对每次 Provider 请求独立插桩；尤其
+  现有 trace 可能遗漏执行中因总 deadline 取消的工具调用。
+- **汇总**：对每案例 P/R/F1 做不加权算术平均；完成率/grounding 率用通过数除以
+  **全部案例数**，包含 Runner 失败和安全失败场景。平均耗时用同一分母；工具/错误次数
+  求和，不静默从分母剔除失败案例。
+
+### 运行与复现
+
+```bash
+python examples/evaluate.py --output /tmp/stockmind-evaluation.json
+python examples/evaluate.py --lang zh   # JSON 输出到 stdout，不加载 .env
+```
+
+JSON 包含数据集/fixture 版本及哈希、运行时包版本、Case ID、预期/实际/请求工具、来自
+trace 的调用记录、报告、observations、全部检查、执行指标、失败原因和聚合规则。
+数据集 JSON 已加入 package data；没有新增依赖。在记录的运行环境中，输入值、顺序和
+判定可以复现。耗时、报告生成时间和观测取回时间会变化，不承诺原始 JSON 字节相同。
+测试对两次运行的稳定分数、次数及去除生成时间的报告进行比较。
+
+兼容性：旧的未版本化问题列表接口改为 `load_dataset()` 和 `EvaluationDataset`。
+`Evaluator(agent_factory)` 仍接受 ticker-to-agent factory，但评估输入使用新数据集
+模型；`RunMetrics`/`EvaluationReport` 改为可序列化 Pydantic 模型。旧质量、数值准确率
+及将 recall 称为 accuracy 的 helper 已移除，调用者应使用显式检查和 `aggregate`
+字段。CLI 不再根据凭据自动启用真实 API，也不提供 live 模式参数。
+
+P2-A 验证（2026-11-17，复用 Python 3.12.8 / pytest 9.2.0）：
+
+- `.venv/bin/python examples/evaluate.py --output /tmp/stockmind-p2-a-baseline.json`：
+  12/12 完成、12/12 grounding 一致；macro P/R/F1 均为 1.0；记录 25 次工具尝试、
+  3 个预期场景错误，所有结束状态为 `finished`。最终本地运行平均 Agent 耗时 11.32 ms，
+  只是一次测量，不是性能 benchmark 或成本承诺。
+- `.venv/bin/python -m pytest tests/test_evaluation.py -v`：**34 passed**。
+- `.venv/bin/python -m pytest -v`：**182 passed、0 failed、0 skipped**（13.42 秒）。
+  一条警告涉及沙箱内 pytest 缓存写入权限。
+- `.venv/bin/python -m compileall -q app tests examples`：允许写入字节码后通过；
+  首次沙箱运行受到权限限制。
+- `git diff --check`：通过。
+
+测试覆盖 Schema 拒绝、空/重复工具集合、多余/缺失工具、独立重复运行、阻止联网时的
+不利环境配置、篡改报告证据、no-data 完成规则、失败案例分母、取消和 JSON 输出。
+原有 Workflow 测试仍在完整套件中。脚本高分只验证接线与规则，不衡量真实 LLM 的工具
+选择、研究质量、真实 Provider 可靠性或金融正确性。本轮没有 LLM-as-Judge 或 P2-B/P2-C。
+
+### Prompt 记录
 
 `promptlog/` 是一个独立的本地 prompt 记录工具：
 

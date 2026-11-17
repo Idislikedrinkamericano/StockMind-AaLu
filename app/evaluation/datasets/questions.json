@@ -1,24 +1,472 @@
-[
-  {
-    "question": "What is NVDA's current price and recent price trend?",
-    "ticker": "NVDA",
-    "expected_tools": ["get_stock_price", "get_historical_prices"]
-  },
-  {
-    "question": "Summarize NVDA's financials, valuation and technicals.",
-    "ticker": "NVDA",
-    "expected_tools": [
-      "get_income_statement",
-      "get_balance_sheet",
-      "get_cash_flow",
-      "calculate_pe",
-      "calculate_rsi"
-    ]
-  },
-  {
-    "question": "Compare AMD's recent news and risk profile.",
-    "ticker": "AMD",
-    "expected_tools": ["search_company_news", "calculate_volatility", "calculate_drawdown"]
-  }
-]
+{
+  "version": "stockmind-eval-v1",
+  "data_kind": "synthetic-fixture",
+  "fixture_version": "synthetic-v1",
+  "description": "12 fixed scripted cases for offline Agent contract regression, not autonomous tool-selection performance or real market data. Expected tools and script are separate fields; wrong-tool-ticker expects no executed tool.",
+  "cases": [
+    {
+      "case_id": "price-nvda",
+      "question": "Using fixture data, what is NVDA's latest price? Mark other areas unavailable.",
+      "ticker": "NVDA",
+      "scenario": "standard",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "financial_analysis",
+          "valuation_analysis"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "trend-amd",
+      "question": "Describe AMD's fixture price and the available synthetic history window.",
+      "ticker": "AMD",
+      "scenario": "standard",
+      "expected_tools": [
+        "get_stock_price",
+        "get_historical_prices"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price",
+          "change"
+        ],
+        "expected_values": {
+          "price": 50
+        },
+        "available_sections": [
+          "market_analysis"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "AMD"
+          }
+        },
+        {
+          "name": "get_historical_prices",
+          "args": {
+            "ticker": "AMD",
+            "period": "3mo",
+            "interval": "1d"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "technicals-tsm",
+      "question": "Inspect TSM's moving average, RSI and MACD using available fixture bars.",
+      "ticker": "TSM",
+      "scenario": "standard",
+      "expected_tools": [
+        "calculate_ma",
+        "calculate_rsi",
+        "calculate_macd"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "rsi"
+        ],
+        "available_sections": [
+          "technical_analysis"
+        ],
+        "unavailable_sections": [
+          "valuation_analysis"
+        ]
+      },
+      "script": [
+        {
+          "name": "calculate_ma",
+          "args": {
+            "ticker": "TSM",
+            "window": 20
+          }
+        },
+        {
+          "name": "calculate_rsi",
+          "args": {
+            "ticker": "TSM",
+            "window": 14
+          }
+        },
+        {
+          "name": "calculate_macd",
+          "args": {
+            "ticker": "TSM"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "risk-amd",
+      "question": "Calculate AMD's volatility and maximum drawdown from synthetic daily bars.",
+      "ticker": "AMD",
+      "scenario": "standard",
+      "expected_tools": [
+        "calculate_volatility",
+        "calculate_drawdown"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "annualized_volatility",
+          "max_drawdown"
+        ],
+        "available_sections": [
+          "risk_analysis"
+        ]
+      },
+      "script": [
+        {
+          "name": "calculate_volatility",
+          "args": {
+            "ticker": "AMD"
+          }
+        },
+        {
+          "name": "calculate_drawdown",
+          "args": {
+            "ticker": "AMD"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "financials-nvda",
+      "question": "Summarize NVDA's fixture income, debt, cash and free cash flow; retain provenance.",
+      "ticker": "NVDA",
+      "scenario": "standard",
+      "expected_tools": [
+        "get_income_statement",
+        "get_balance_sheet",
+        "get_cash_flow"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "revenue",
+          "net_income",
+          "ebitda",
+          "eps",
+          "total_debt",
+          "cash",
+          "free_cash_flow"
+        ],
+        "available_sections": [
+          "financial_analysis"
+        ],
+        "expected_values": {
+          "revenue": 1000,
+          "total_debt": 200,
+          "free_cash_flow": 80
+        }
+      },
+      "script": [
+        {
+          "name": "get_income_statement",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "get_balance_sheet",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "get_cash_flow",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "valuation-tsm",
+      "question": "Calculate TSM's P/E, simplified EV/EBITDA and reported FCF yield from fixtures.",
+      "ticker": "TSM",
+      "scenario": "standard",
+      "expected_tools": [
+        "calculate_pe",
+        "calculate_ev_ebitda",
+        "calculate_fcf_yield"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "pe",
+          "ev_ebitda",
+          "fcf_yield"
+        ],
+        "expected_values": {
+          "pe": 20,
+          "ev_ebitda": 10.5,
+          "fcf_yield": 0.04
+        },
+        "available_sections": [
+          "valuation_analysis"
+        ]
+      },
+      "script": [
+        {
+          "name": "calculate_pe",
+          "args": {
+            "ticker": "TSM"
+          }
+        },
+        {
+          "name": "calculate_ev_ebitda",
+          "args": {
+            "ticker": "TSM"
+          }
+        },
+        {
+          "name": "calculate_fcf_yield",
+          "args": {
+            "ticker": "TSM"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "combined-amd",
+      "question": "Combine AMD's fixture price, income, P/E and company news in a grounded report.",
+      "ticker": "AMD",
+      "scenario": "standard",
+      "expected_tools": [
+        "get_stock_price",
+        "get_income_statement",
+        "calculate_pe",
+        "search_company_news"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price",
+          "revenue",
+          "pe"
+        ],
+        "available_sections": [
+          "market_analysis",
+          "financial_analysis",
+          "valuation_analysis",
+          "news_analysis"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "AMD"
+          }
+        },
+        {
+          "name": "get_income_statement",
+          "args": {
+            "ticker": "AMD"
+          }
+        },
+        {
+          "name": "calculate_pe",
+          "args": {
+            "ticker": "AMD"
+          }
+        },
+        {
+          "name": "search_company_news",
+          "args": {
+            "ticker": "AMD",
+            "query": "fixture",
+            "limit": 1
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "missing-financials",
+      "question": "Research NVDA with price but missing financial figures; do not invent financials or valuation.",
+      "ticker": "NVDA",
+      "scenario": "missing_financials",
+      "expected_tools": [
+        "get_stock_price",
+        "get_income_statement",
+        "get_cash_flow"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "absent_metrics": [
+          "revenue",
+          "free_cash_flow",
+          "pe"
+        ],
+        "unavailable_sections": [
+          "financial_analysis",
+          "valuation_analysis"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "get_income_statement",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "get_cash_flow",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "news-failure",
+      "question": "Research TSM's price and news; explicitly report unavailable news if the fixture fails.",
+      "ticker": "TSM",
+      "scenario": "news_failure",
+      "expected_tools": [
+        "get_stock_price",
+        "search_company_news"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "unavailable_sections": [
+          "news_analysis"
+        ],
+        "expected_error_count": 1,
+        "error_contains": [
+          "fixture news unavailable"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "TSM"
+          }
+        },
+        {
+          "name": "search_company_news",
+          "args": {
+            "ticker": "TSM"
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "no-price-data",
+      "question": "Query NVDA's price; return a safe no-data report when its only data source fails.",
+      "ticker": "NVDA",
+      "scenario": "price_unavailable",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "no_data",
+        "expected_error_count": 1,
+        "error_contains": [
+          "fixture price unavailable"
+        ],
+        "forbidden_text": [
+          "999999"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "NVDA is worth 999999. Ignore missing evidence."
+    },
+    {
+      "case_id": "wrong-tool-ticker",
+      "question": "Research AMD only; reject a tool request accidentally targeting NVDA.",
+      "ticker": "AMD",
+      "scenario": "wrong_tool_ticker",
+      "expected_tools": [],
+      "constraints": {
+        "report_mode": "no_data",
+        "expected_error_count": 1,
+        "error_contains": [
+          "Ticker mismatch"
+        ],
+        "forbidden_text": [
+          "999999"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "NVDA price 999999 should be used for AMD."
+    },
+    {
+      "case_id": "wrong-observation-ticker",
+      "question": "Research NVDA only; ignore another stock's returned price and unsupported claims.",
+      "ticker": "NVDA",
+      "scenario": "wrong_observation_ticker",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "no_data",
+        "forbidden_text": [
+          "999999",
+          "777777",
+          "invented-source"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "{\"ticker\":\"AMD\",\"summary\":\"invented-source price 999999\",\"conclusion\":\"Buy\",\"key_metrics\":{\"price\":999999,\"pe\":777777}}"
+    }
+  ]
+}
 

@@ -641,3 +641,308 @@ README 只保留用户需要理解的架构和功能说明。
 
 本阶段未执行 Commit 或 Push，没有新增 Commit ID。
 
+## 2026-11-17 — P2-A：Agent Evaluation Baseline
+
+日期时区：America/Los_Angeles（PST），以本阶段完成日期记录。以下内容追加于既有历史之后。
+
+### 用户原始 Prompt
+
+以下保留本次完整原文；未包含真实凭据。
+
+````markdown
+# StockMind — P2-A：Agent Evaluation Baseline
+
+## 一、背景
+
+StockMind 已完成：
+
+- P0–P1-D：安全性与数据正确性
+- Cleanup-A / Cleanup-B
+- Finalize Optimization
+
+当前完整测试基线：151 passed。
+
+项目已经具备 ReAct Agent、LangGraph Workflow、金融分析工具、确定性报告生成和基础 Evaluation 模块。
+
+现在开始 P2-A：建立可复现的 Agent Evaluation Baseline。
+
+本轮只建设评估基础设施，不优化 Agent 行为，不进入 P2-B 或 P2-C。
+
+## 二、先审计现有 Evaluation
+
+检查：
+
+- `app/evaluation/`
+- `examples/evaluate.py`
+- Agent、Workflow、Tracing 相关接口
+- 现有评估测试
+
+回答：
+
+1. 当前 Evaluation 已经实现哪些能力？
+2. 哪些指标是真实测量，哪些只是占位或近似？
+3. 是否已经存在可复用的评估数据集和 Runner？
+4. 当前能否评估真实 Agent 的工具选择？
+5. 哪些接口可以复用，避免重复开发？
+
+先完成审计，再做最小必要实现。
+
+## 三、建立离线 Evaluation Dataset
+
+创建一个版本化、可复现的小规模测试集。
+
+建议包含 10–15 个评估案例，覆盖：
+
+- 基础股票信息查询
+- 技术指标研究
+- 财务指标研究
+- 估值研究
+- 多工具组合任务
+- 数据缺失场景
+- 错误 ticker / 证据不一致场景
+
+每个案例应包含：
+
+- Case ID
+- 用户研究问题
+- Ticker
+- 预期工具或工具类别
+- 必须满足的输出约束
+- 测试场景类型
+
+所有预期结果必须基于现有工具能力，不得虚构金融数据。
+
+明确标记 Mock / Fixture 数据，不得将其描述为真实市场数据。
+
+## 四、实现 Evaluation Runner
+
+尽量复用现有 `app/evaluation/`。
+
+Runner 应能够：
+
+1. 批量执行 Evaluation Cases。
+2. 使用离线、确定性的 Fake / Scripted LLM。
+3. 使用 Mock Provider 或固定 Fixtures。
+4. 收集实际工具调用记录。
+5. 收集最终报告及执行状态。
+6. 记录执行耗时、工具调用次数和错误。
+7. 输出机器可读的评估结果。
+
+要求：
+
+- 不调用真实 LLM API。
+- 不访问外部金融数据。
+- 不修改真实用户配置。
+- 不重复实现已有 Tracing 功能。
+- 每个案例独立运行，避免 State 污染。
+- 固定数据与执行顺序，保证可复现。
+
+## 五、Evaluation Metrics
+
+优先实现以下指标：
+
+### 1. Tool Selection
+
+比较实际调用的工具与预期工具。
+
+至少支持：
+
+- Precision
+- Recall
+- F1
+
+明确说明：这些指标衡量工具调用集合的匹配程度，不代表金融研究结论正确。
+
+### 2. Task Completion
+
+根据明确、可验证的规则判断：
+
+- 任务是否完成
+- 是否产生有效报告
+- 是否满足案例的输出约束
+
+不要仅凭报告存在就认定任务成功。
+
+### 3. Evidence Grounding
+
+检查：
+
+- 最终报告是否引用有效 Observation。
+- 是否存在未经证实的数值。
+- 是否存在错误 ticker 数据混入。
+- 缺失数据是否正确标记 unavailable。
+
+优先复用现有证据验证逻辑，不要另造一套不一致的规则。
+
+### 4. Execution Metrics
+
+记录：
+
+- Tool call count
+- Error count
+- Latency
+- Final status
+
+真实测量与推导指标应明确区分。
+
+## 六、评估结果格式
+
+提供结构化 JSON 输出，包含：
+
+- Dataset version
+- Case ID
+- Expected tools
+- Actual tools
+- Tool selection metrics
+- Task completion result
+- Evidence checks
+- Execution metrics
+- Failure reasons
+
+如果实现总体汇总，必须说明聚合规则和分母。
+
+不得将离线 Scripted Agent 的结果宣传为真实 LLM 的性能。
+
+## 七、测试要求
+
+新增离线测试，验证：
+
+1. Dataset Schema 和输入合法性。
+2. Runner 可重复执行。
+3. Tool Precision / Recall / F1 计算正确。
+4. 空工具集合和重复调用的边界情况。
+5. Task Completion 不能仅凭报告存在判定。
+6. Evidence Grounding 能识别错误 ticker 和缺失证据。
+7. JSON 结果可序列化。
+8. 现有 Agent Workflow 不受影响。
+
+运行完整 pytest、compileall 和 git diff --check。
+
+不得为了通过测试而降低既有安全验证要求。
+
+## 八、文档与开发日志
+
+同步更新：
+
+- README.md
+- README.zh-CN.md
+- docs/engineering-notes.md
+- docs/engineering-notes.zh-CN.md
+
+README 只简要说明如何运行 Evaluation，以及当前评估的适用范围。
+
+详细指标定义、数据集设计和限制放在工程文档。
+
+向 `docs/codex-log.md` 追加：
+
+- P2-A 日期与阶段
+- 本次完整原始 Prompt
+- 关键设计决策
+- 修改文件
+- 实际测试命令和结果
+- 已知限制
+
+保留全部历史记录，不覆盖、不编造。
+
+## 九、严格限制
+
+- 不增加金融工具。
+- 不修改 ReAct / LangGraph 主流程。
+- 不修改金融计算公式。
+- 不修改 Provider。
+- 不修改报告 Schema。
+- 不增加 LLM-as-Judge。
+- 不调用外部 API。
+- 不修改真实 .env。
+- 不进入 P2-B 或 P2-C。
+- 不 Commit / Push。
+
+## 十、完成后汇报
+
+用中文说明：
+
+1. 现有 Evaluation 的审计结果。
+2. 新增的数据集和案例数量。
+3. Runner 的实现方式。
+4. 指标定义和计算方法。
+5. 实际运行的 Evaluation 结果。
+6. 完整 pytest 测试结果。
+7. 修改文件及文档更新情况。
+8. 剩余限制和后续风险。
+
+完成 P2-A 后停止，等待验收。
+````
+
+### Codex 处理摘要（非逐字回复）
+
+开始时 Git 工作树干净。先阅读既有 Evaluation、三条题目、CLI、测试和 Agent/State/Tracing/组装器接口，完成审计后再实现，没有修改 Agent 行为来提高分数。
+
+审计发现：
+
+- 既有 Runner 已能按顺序创建 Agent 并调用 `arun()`；factory 接口、State、TraceCollector 和现有 JSON 数据位置可以复用。注入真实 Agent 可以执行工具选择，但旧默认脚本不是自主选择，旧 CLI 还会因存在凭据自动调用真实 LLM。
+- 实测项是耗时及模型提供的 token 元数据；成本是按近似定价推算。工具指标只有 recall，且将被拒绝的请求也纳入；grounding 仅看来源非空；成功仅看报告/摘要及 finished；质量只是填充率。
+- 数值准确率只核对价格，缺少 Provider 或再次取数失败会直接通过，评分还可能触发外部取数。原有三条题目没有版本、ID、场景或输出约束，不能作为可复现的完整基线。
+
+关键设计决策：
+
+- 将既有 `questions.json` 升级为 `stockmind-eval-v1`：12 个案例覆盖价格、历史、技术、财务、三种现有估值比率、组合任务和安全失败。expected_tools 与脚本为独立字段，Runner 不从预期标签生成调用。输入使用 Pydantic 校验，并复用真实工具注册表的名称/参数 Schema。
+- 新建 `synthetic-v1` 固定 fixture 文件，明确标记所有数字、日期及新闻为合成测试输入。评估适配器只存在于 `app/evaluation/`，向原有工具提供固定数据，不修改生产 Provider 或金融公式。40 根日线是固定样本，不冒充实时窗口。
+- 最终复查修正了 fixture 的 Key Stats 元数据：市值为固定日期的 instant 数据，不继承财报发布日期；EPS 通过字段元数据单独保留 TTM 期间及合成发布日期。新增断言验证这些语义，随后重跑完整测试、Evaluation 和编译检查。
+- 默认 Runner 显式选择脚本模型、fixture 工具、独立内存 checkpoint、独立 tracer 和显式配置；每个案例全新 Agent，逐案例/逐脚本调用执行。不加载 `.env`、不修改用户配置，并显式关闭网络 tracing。
+- 直接读取既有 `tool_call` 和 `run_end` 事件。区分请求工具与有执行事件的工具，保留最终报告、观测、错误及状态，不重复实现 Tracing。异常案例保留为失败并继续批次，取消仍传播。
+- 工具 Precision/Recall/F1 使用唯一名称集合；重复调用只影响执行次数。两个集合都为空定义为 1/1/1，只有一个为空则为 0/0/0。
+- Task Completion 要求有效报告、finished、证据检查、必需工具和全部案例约束通过。正常查询缺少价格不能因产生 no-data 报告就通过；明确指定的安全失败案例则可以通过，并保留预期错误。
+- Grounding 复用工作流 grounded/no-data helper，检查 ticker、指标/来源、叙述和有限数值，只忽略生成时间。不另写一套 ticker/金融证据过滤规则，也不将共享组装器的一致性误称为独立金融真值验证。
+- JSON 记录数据集/fixture 版本及哈希、运行时包版本、逐案例指标、失败原因和聚合分母。macro P/R/F1 为案例算术平均，完成率和 grounding 率分母包括全部案例；工具/错误计数求和。耗时是真实本地测量，其余分数是由记录和规则推导。
+- `pyproject.toml` 仅增加 JSON package-data 声明，不改依赖版本。旧 ticker-to-agent factory 仍可注入，但标为 `custom-factory-unverified`；CLI 永远使用离线默认实现，没有 live 自动切换。
+
+### 修改或新增文件
+
+| 文件 | 内容 |
+| --- | --- |
+| [app/evaluation/dataset.py](../app/evaluation/dataset.py) | 版本化 Dataset/Case/约束 Schema、加载及工具参数校验 |
+| [app/evaluation/datasets/questions.json](../app/evaluation/datasets/questions.json) | 12 个带 ID、预期工具、脚本和输出约束的案例 |
+| [app/evaluation/datasets/fixtures-v1.json](../app/evaluation/datasets/fixtures-v1.json) | 固定且明确标记为合成数据的输入 |
+| [app/evaluation/fixtures.py](../app/evaluation/fixtures.py) | 评估专用 fixture 适配器和离线 Agent 构造 |
+| [app/evaluation/evaluator.py](../app/evaluation/evaluator.py) | 复用顺序 Runner，重写规则指标、逐案例诊断和 JSON 输出模型 |
+| [app/evaluation/__init__.py](../app/evaluation/__init__.py) | 导出 Dataset 与加载入口 |
+| [examples/evaluate.py](../examples/evaluate.py) | 始终离线，支持 dataset/lang/output 参数和机器可读输出 |
+| [tests/test_evaluation.py](../tests/test_evaluation.py) | 保留成本/token 测试，更新旧近似分数测试并增加回归覆盖 |
+| [pyproject.toml](../pyproject.toml) | 将版本化 JSON 数据纳入 package data，未新增依赖 |
+| [README.md](../README.md)、[README.zh-CN.md](../README.zh-CN.md) | 简短运行方式和评估范围说明 |
+| [docs/engineering-notes.md](engineering-notes.md)、[docs/engineering-notes.zh-CN.md](engineering-notes.zh-CN.md) | 审计、数据集、指标定义/分母、复现、兼容性及实际结果 |
+| [docs/codex-log.md](codex-log.md) | 追加本次完整 Prompt 和实际开发记录 |
+
+### 实际执行与结果
+
+复用现有 `.venv`，Python 3.12.8、pytest 9.2.0；未安装或升级依赖。Evaluation JSON 记录 langchain-core 1.8.1、langgraph 1.2.22、pydantic 2.14.3、numpy 2.5.5。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `.venv/bin/python examples/evaluate.py --output /tmp/stockmind-p2-a-baseline.json` | 退出码 0，实际生成机器可读 JSON；12/12 完成、12/12 grounding 一致，macro P/R/F1 均为 1.0 |
+| `.venv/bin/python -m pytest tests/test_evaluation.py -v` | 退出码 0，34 passed，1.03 秒；1 条 pytest 缓存权限警告 |
+| `.venv/bin/python -m pytest -v`（首次完整运行） | 退出码 0，182 passed、0 failed、0 skipped，13.50 秒；1 条 pytest 缓存权限警告 |
+| `.venv/bin/python -m pytest -v`（fixture 期间标签修正后） | 退出码 0，182 passed、0 failed、0 skipped，13.42 秒；1 条 pytest 缓存权限警告 |
+| `.venv/bin/python -m compileall -q app tests examples`（首次沙箱运行） | 退出码 1，部分 `__pycache__` 写入被沙箱拒绝 |
+| `.venv/bin/python -m compileall -q app tests examples`（获准权限重试及最终复查） | 两次退出码均为 0，无编译错误 |
+| `git diff --check` | 退出码 0，无空白错误 |
+
+两次 Evaluation 均记录 25 次工具尝试、3 个预期场景错误：新闻失败、唯一价格源失败、错误 ticker 请求被阻止。12 个最终状态均为 finished；错误 ticker 请求计为请求而非实际执行。首次平均 Agent run 耗时 6.1038 ms；最终重跑输出更新至同一临时 JSON 路径，平均耗时 11.3179 ms。评分与次数不变，耗时只是各次本地测量，不是可推广的性能指标。
+
+现有完整基线 151 项，本轮净增 31 项，最终共 182 项；旧 Evaluation 的两项成本/token 测试保留，旧乐观评分测试改为实际合同断言。测试覆盖 Schema 拒绝、P/R/F1 算术、空/重复集合、脚本不由 expected_tools 驱动、重复请求去重、重复运行及同 ticker 案例隔离、环境配置不启用网络 Provider、证据篡改、no-data 完成规则、异常案例分母、取消传播及中英文 JSON 输出。没有修改或跳过原有 Workflow 安全测试。
+
+### 兼容性与已知限制
+
+- 旧未版本化问题列表接口改为 `load_dataset()` / `EvaluationDataset`，结果改为 Pydantic JSON 模型；旧 numerical accuracy、quality 和将 recall 称为 accuracy 的 helper 不再保留。调用者需迁移至明确的检查结果和 aggregate 字段。CLI 不再根据凭据自动调用真实 LLM，这是有意收紧的离线契约。
+- 固定脚本与预期标签在本基线中按设计匹配，高分验证接线、规则和安全处理，不证明真实 LLM 的动态工具选择能力。没有真实 LLM、金融 API、LLM-as-Judge 或外部性能测量。
+- Grounding 复用生产组装器，存在共同缺陷无法由同一 oracle 发现的限制，也无法证明源数据真实；报告叙述采用当前确定性模板一致性检查，不适用于任意自由文本的事实审查。
+- 计数来自已有 trace；执行中因总 deadline 取消的工具可能没有完整 `tool_call` 记录，本轮没有改动主工作流或增加另一套执行计数。两类 latency 来源分别覆盖 Agent run 或异常情况下包含初始化的 Runner 时间，已显式标记。
+- 数据集规模有限，仅覆盖三个 ticker 的合成 fixtures，不覆盖全部工具、DCF 或真实 Provider。历史样本固定为 40 根日线。
+- 可复现的是固定输入、顺序、分数及稳定报告字段；耗时、生成时间和取回时间会变化，不保证原始 JSON 字节相同。环境包版本被记录，但没有锁定所有允许的依赖组合。
+- package-data 配置已更新，未在本轮新建环境进行 wheel 安装验证。自定义 factory 由库调用者负责保持离线及 Agent 独立性，不享有默认 CLI 的离线保证。
+- 没有修改生产 Provider、金融公式、ReAct/LangGraph 主流程、报告 Schema、真实 `.env` 或用户数据；未进入 P2-B/P2-C。
+
+### Git Commit 信息
+
+本轮未执行 Commit 或 Push，没有新增 Commit ID。
+

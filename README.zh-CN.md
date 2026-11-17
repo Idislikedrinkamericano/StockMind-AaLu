@@ -138,6 +138,17 @@ python app.py
 需要 requirements 文件的平台可在仓库根目录执行 `pip install -r requirements.txt`；
 该文件统一引用 `.[web]`。
 
+### 离线评估
+
+```bash
+python examples/evaluate.py --output /tmp/stockmind-evaluation.json
+```
+
+使用固定合成 fixtures 和脚本化 LLM 响应运行 12 个版本化案例，不随 API Key 或 Provider
+配置切换模式。JSON 包含工具集合 Precision / Recall / F1、规则化任务完成检查、报告与
+观测一致性及执行指标。这些是回归检查，不代表真实 LLM 性能或独立金融准确性验证。
+详见[指标定义与限制](docs/engineering-notes.zh-CN.md#评估与-prompt-记录)。
+
 ## 技术栈
 
 - Python 3.11+

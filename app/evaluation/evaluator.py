@@ -1,186 +1,249 @@
-"""Evaluation framework (Phase 4).
+"""Rule-based scoring of actual Agent state and existing trace events.
 
-Runs a dataset of questions through an agent and measures task success, tool
-selection, data grounding, numerical accuracy, answer quality, latency, token
-usage and cost. It is provider-agnostic and works offline with the demo model +
-mock provider.
+Default execution is offline/scripted. These scores are contract checks, not
+autonomous LLM performance, independent financial truth, or investment quality.
 """
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import math
+import platform
+import time
+from importlib.metadata import version
 from typing import Any, Callable
 
-from app.models.demo import GROUNDED_REPORT_MARKER
-from app.observability.cost import estimate_cost_usd
+from langsmith import tracing_context
+from pydantic import BaseModel, Field
+
+from app.evaluation.dataset import EvaluationCase, EvaluationDataset
+from app.evaluation.fixtures import FIXTURE_PATH, build_offline_agent
+from app.graph.workflow import _grounded_or_no_data_report
 from app.schemas.report import StockResearchReport
 
-_NOT_COVERED = "Not covered in this phase."
+
+class ToolSelection(BaseModel):
+    precision: float
+    recall: float
+    f1: float
+    true_positives: int
+    false_positives: int
+    false_negatives: int
 
 
-@dataclass
-class RunMetrics:
+def tool_selection(expected: list[str], actual: list[str]) -> ToolSelection:
+    """Set matching. Both empty => 1/1/1; only one empty => 0/0/0."""
+    expected_set, actual_set = set(expected), set(actual)
+    tp = len(expected_set & actual_set)
+    precision = tp / len(actual_set) if actual_set else float(not expected_set)
+    recall = tp / len(expected_set) if expected_set else float(not actual_set)
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return ToolSelection(precision=precision, recall=recall, f1=f1, true_positives=tp,
+                         false_positives=len(actual_set - expected_set),
+                         false_negatives=len(expected_set - actual_set))
+
+
+def _finite(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_finite(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_finite(item) for item in value)
+    return True
+
+
+def evidence_checks(state: dict[str, Any], ticker: str) -> dict[str, bool]:
+    """Reuse the workflow's assembler/no-data policy, excluding generated_at.
+
+    This checks output consistency, not provider truth or assembler correctness.
+    Exact content comparison detects added claims without parsing prose numbers.
+    """
+    report = state.get("final_output")
+    checks = dict.fromkeys(("report_schema", "ticker_matches_request", "finite_numbers",
+                            "metrics_match_observations", "content_matches_assembler"), False)
+    if not isinstance(report, StockResearchReport):
+        return checks
+    checks["report_schema"] = True
+    checks["ticker_matches_request"] = report.ticker == ticker and state.get("ticker") == ticker
+    checks["finite_numbers"] = _finite(report.model_dump())
+    expected = _grounded_or_no_data_report({**state, "ticker": ticker}, ticker)
+    checks["metrics_match_observations"] = report.key_metrics == expected.key_metrics
+    excluded = {"generated_at", "key_metrics", "ticker"}
+    checks["content_matches_assembler"] = report.model_dump(exclude=excluded) == expected.model_dump(exclude=excluded)
+    return checks
+
+
+def completion_checks(case: EvaluationCase, state: dict[str, Any], actual_tools: list[str],
+                      evidence: dict[str, bool]) -> dict[str, bool]:
+    report = state.get("final_output")
+    errors = state.get("errors", [])
+    rule = case.constraints
+    checks = {
+        "finished": state.get("status") == "finished",
+        "valid_report": isinstance(report, StockResearchReport),
+        "evidence": all(evidence.values()),
+        "expected_tools_executed": set(case.expected_tools) <= set(actual_tools),
+        "error_count": len(errors) == rule.expected_error_count,
+        "expected_errors": all(any(text in error for error in errors) for text in rule.error_contains),
+    }
+    if not isinstance(report, StockResearchReport):
+        return checks
+    metrics = report.key_metrics
+    checks["report_mode"] = bool(metrics) if rule.report_mode == "grounded" else metrics == {}
+    for name in rule.required_metrics:
+        value = metrics.get(name)
+        checks[f"required_metric:{name}"] = isinstance(value, (float, int)) and not isinstance(value, bool) and _finite(value)
+    for name in rule.absent_metrics:
+        checks[f"absent_metric:{name}"] = metrics.get(name) is None
+    for name, expected in rule.expected_values.items():
+        value = metrics.get(name)
+        checks[f"expected_value:{name}"] = (isinstance(value, (float, int)) and not isinstance(value, bool)
+                                            and math.isclose(value, expected, rel_tol=1e-9, abs_tol=1e-12))
+    for name in rule.available_sections:
+        value = getattr(report, name)
+        checks[f"available_section:{name}"] = bool(value) and value != "Not covered in this phase." and not value.startswith("Unavailable")
+    for name in rule.unavailable_sections:
+        checks[f"unavailable_section:{name}"] = getattr(report, name).startswith("Unavailable")
+    text = report.model_dump_json()
+    for forbidden in rule.forbidden_text:
+        checks[f"forbidden_text:{forbidden}"] = forbidden not in text
+    return checks
+
+
+class ExecutionMetrics(BaseModel):
+    tool_call_count: int  # recorded tool_call attempts, including retry/error events
+    requested_tool_count: int
+    observation_count: int
+    error_count: int  # state errors, not duplicated trace errors
+    latency_ms: float
+    latency_source: str
+    final_status: str
+
+
+class RunMetrics(BaseModel):
+    case_id: str
     question: str
     ticker: str
-    success: bool
+    scenario: str
+    expected_tools: list[str]
+    actual_tools: list[str]
+    requested_tools: list[str]
+    actual_calls: list[dict[str, Any]]
+    tool_selection: ToolSelection
+    task_completed: bool
+    completion_checks: dict[str, bool]
     grounded: bool
-    tool_recall: float
-    numerical_ok: bool
-    quality: float
-    latency_ms: float
-    input_tokens: int
-    output_tokens: int
-    cost_usd: float
+    evidence_checks: dict[str, bool]
+    execution: ExecutionMetrics
+    errors: list[str]
+    failure_reasons: list[str]
+    report: StockResearchReport | None
+    observations: list[dict[str, Any]]
 
 
-@dataclass
-class EvaluationReport:
-    runs: list[RunMetrics] = field(default_factory=list)
-
-    def _rate(self, values: list[bool]) -> float:
-        if not values:
-            return 0.0
-        return sum(values) / len(values)
-
-    def task_success_rate(self) -> float:
-        return self._rate([r.success for r in self.runs])
-
-    def tool_selection_accuracy(self) -> float:
-        return sum(r.tool_recall for r in self.runs) / len(self.runs) if self.runs else 0.0
-
-    def data_grounding_rate(self) -> float:
-        return self._rate([r.grounded for r in self.runs])
-
-    def numerical_accuracy(self) -> float:
-        return self._rate([r.numerical_ok for r in self.runs])
-
-    def avg_quality(self) -> float:
-        return sum(r.quality for r in self.runs) / len(self.runs) if self.runs else 0.0
-
-    def avg_latency_ms(self) -> float:
-        return sum(r.latency_ms for r in self.runs) / len(self.runs) if self.runs else 0.0
-
-    def avg_tokens(self) -> float:
-        return (
-            sum(r.input_tokens + r.output_tokens for r in self.runs) / len(self.runs)
-            if self.runs
-            else 0.0
-        )
-
-    def avg_cost_usd(self) -> float:
-        return sum(r.cost_usd for r in self.runs) / len(self.runs) if self.runs else 0.0
+class EvaluationReport(BaseModel):
+    dataset_version: str
+    dataset_sha256: str
+    fixture_version: str
+    fixture_sha256: str
+    runner_mode: str
+    language: str
+    runtime_versions: dict[str, str]
+    runs: list[RunMetrics] = Field(default_factory=list)
+    aggregate: dict[str, Any] = Field(default_factory=dict)
 
     def summary(self) -> str:
-        lines = [
-            "EVALUATION REPORT",
-            "=" * 40,
-            f"Runs: {len(self.runs)}",
-            f"Task Success Rate:      {self.task_success_rate():.0%}",
-            f"Tool Selection Accuracy:{self.tool_selection_accuracy():.0%}",
-            f"Data Grounding Rate:    {self.data_grounding_rate():.0%}",
-            f"Numerical Accuracy:     {self.numerical_accuracy():.0%}",
-            f"Answer Quality (avg):   {self.avg_quality():.0%}",
-            f"Average Latency:        {self.avg_latency_ms() / 1000.0:.2f}s",
-            f"Average Tokens:         {self.avg_tokens():.0f}",
-            f"Average Cost:           ${self.avg_cost_usd():.6f}",
-        ]
-        return "\n".join(lines)
+        return (f"{self.runner_mode} — {self.dataset_version}\n"
+                f"Cases: {len(self.runs)}; completed: {sum(run.task_completed for run in self.runs)}\n"
+                f"Macro tool F1: {self.aggregate['macro_tool_f1']:.3f}; "
+                f"grounding consistency: {self.aggregate['grounding_rate']:.3f}\n"
+                "Scripted/fixture results are not real-LLM performance or financial accuracy.")
 
 
 class Evaluator:
-    """Run a dataset through per-ticker agents and score the results."""
+    """Sequential evaluator; injected ticker -> agent factories must return fresh agents.
 
-    def __init__(self, agent_factory: Callable[[str | None], Any]) -> None:
-        # agent_factory(ticker) -> a fresh StockMindAgent for that ticker.
+    The CLI never injects a factory. Library callers control the data/model
+    access of custom factories, whose results are labelled separately.
+    """
+
+    def __init__(self, agent_factory: Callable[[str], Any] | None = None, *, language: str = "en"):
+        if language not in {"en", "zh"}:
+            raise ValueError("Evaluation language must be en or zh")
         self.agent_factory = agent_factory
+        self.language = language
 
-    async def evaluate(self, dataset: list[dict[str, Any]]) -> EvaluationReport:
-        runs: list[RunMetrics] = []
-        for index, item in enumerate(dataset):
-            question = item["question"]
-            ticker = item.get("ticker")
-            agent = self.agent_factory(ticker)
-            state = await agent.arun(
-                question, ticker=ticker, thread_id=f"eval-{index}"
-            )
-            runs.append(self._metrics(agent, state, item))
-        return EvaluationReport(runs=runs)
+    async def evaluate(self, dataset: EvaluationDataset) -> EvaluationReport:
+        dataset = EvaluationDataset.model_validate(dataset.model_dump())
+        runs = []
+        for case in dataset.cases:
+            agent = None
+            start = time.perf_counter()
+            try:
+                # Explicitly disable network telemetry from ambient environment settings.
+                with tracing_context(enabled=False):
+                    agent = self.agent_factory(case.ticker) if self.agent_factory else build_offline_agent(case, self.language)
+                    state = await agent.arun(case.question, ticker=case.ticker, thread_id=f"eval-{case.case_id}")
+            except Exception as exc:
+                state = {"ticker": case.ticker, "language": self.language, "status": "error",
+                         "errors": [f"{type(exc).__name__}: {exc}"]}
+            elapsed = (time.perf_counter() - start) * 1000.0
+            runs.append(self._metrics(agent, state, case, elapsed))
+        count = len(runs)
+        mean = lambda values: sum(values) / count
+        aggregate = {
+            "case_count": count,
+            "denominator": "all cases, including runner failures and safe-failure scenarios",
+            "tool_aggregation": "unweighted macro average of per-case set scores",
+            "macro_tool_precision": mean([run.tool_selection.precision for run in runs]),
+            "macro_tool_recall": mean([run.tool_selection.recall for run in runs]),
+            "macro_tool_f1": mean([run.tool_selection.f1 for run in runs]),
+            "task_completion_rate": mean([run.task_completed for run in runs]),
+            "grounding_rate": mean([run.grounded for run in runs]),
+            "average_latency_ms": mean([run.execution.latency_ms for run in runs]),
+            "total_tool_calls": sum(run.execution.tool_call_count for run in runs),
+            "total_errors": sum(run.execution.error_count for run in runs),
+        }
+        return EvaluationReport(
+            dataset_version=dataset.version,
+            dataset_sha256=hashlib.sha256(dataset.model_dump_json().encode()).hexdigest(),
+            fixture_version=dataset.fixture_version,
+            fixture_sha256=hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest(),
+            runner_mode="offline-scripted" if self.agent_factory is None else "custom-factory-unverified",
+            language=self.language,
+            runtime_versions={"python": platform.python_version(), **{
+                name: version(name) for name in ("langchain-core", "langgraph", "pydantic", "numpy")}},
+            runs=runs, aggregate=aggregate,
+        )
 
-    def _metrics(self, agent: Any, state: dict[str, Any], item: dict[str, Any]) -> RunMetrics:
+    @staticmethod
+    def _metrics(agent: Any, state: dict[str, Any], case: EvaluationCase, elapsed: float) -> RunMetrics:
+        events = agent.tracer.events if agent is not None else []
+        attempts = [event for event in events if event.event_type == "tool_call"]
+        actual = sorted({event.tool_name for event in attempts if event.tool_name})
+        requested = [call.get("name", "") for call in state.get("tool_calls", [])]
+        errors = state.get("errors", [])
+        end = next((event for event in reversed(events) if event.event_type == "run_end"), None)
+        evidence = evidence_checks(state, case.ticker)
+        completion = completion_checks(case, state, actual, evidence)
+        reasons = [f"evidence:{name}" for name, passed in evidence.items() if not passed]
+        reasons += [f"completion:{name}" for name, passed in completion.items() if not passed]
+        selection = tool_selection(case.expected_tools, actual)
+        if selection.f1 < 1:
+            reasons.append("tool_selection:set_mismatch")
         report = state.get("final_output")
-        tracer = agent.tracer
-
-        expected = item.get("expected_tools", [])
-        called = {obs.get("tool") for obs in state.get("observations", [])}
-        called |= {call.get("name") for call in state.get("tool_calls", [])}
-        recall = (
-            sum(1 for tool in expected if tool in called) / len(expected)
-            if expected
-            else 1.0
-        )
-
         return RunMetrics(
-            question=item["question"],
-            ticker=item.get("ticker", "UNKNOWN"),
-            success=self._success(state, report),
-            grounded=self._grounded(report),
-            tool_recall=recall,
-            numerical_ok=self._numerical_ok(agent, report, item),
-            quality=self._quality(report),
-            latency_ms=tracer.total_latency_ms(),
-            input_tokens=tracer.total_input_tokens,
-            output_tokens=tracer.total_output_tokens,
-            cost_usd=estimate_cost_usd(
-                tracer.model, tracer.total_input_tokens, tracer.total_output_tokens
-            ),
+            case_id=case.case_id, question=case.question, ticker=case.ticker, scenario=case.scenario,
+            expected_tools=case.expected_tools, actual_tools=actual, requested_tools=requested,
+            actual_calls=[{"name": event.tool_name, "args": event.tool_input, "error": event.error} for event in attempts],
+            tool_selection=selection, task_completed=all(completion.values()), completion_checks=completion,
+            grounded=all(evidence.values()), evidence_checks=evidence,
+            execution=ExecutionMetrics(tool_call_count=len(attempts), requested_tool_count=len(requested),
+                                       observation_count=len(state.get("observations", [])), error_count=len(errors),
+                                       latency_ms=end.latency_ms if end and end.latency_ms is not None else elapsed,
+                                       latency_source="run_end_trace" if end and end.latency_ms is not None else "runner_elapsed",
+                                       final_status=state.get("status", "error")),
+            errors=errors, failure_reasons=reasons,
+            report=report if isinstance(report, StockResearchReport) else None,
+            observations=state.get("observations", []),
         )
-
-    @staticmethod
-    def _success(state: dict[str, Any], report: Any) -> bool:
-        if not isinstance(report, StockResearchReport):
-            return False
-        if state.get("status") != "finished":
-            return False
-        if not report.summary or GROUNDED_REPORT_MARKER in report.summary:
-            return False
-        return True
-
-    @staticmethod
-    def _grounded(report: Any) -> bool:
-        if not isinstance(report, StockResearchReport):
-            return False
-        sources = (report.key_metrics or {}).get("data_sources") or []
-        return bool(sources)
-
-    def _numerical_ok(self, agent: Any, report: Any, item: dict[str, Any]) -> bool:
-        if not isinstance(report, StockResearchReport):
-            return False
-        price = (report.key_metrics or {}).get("price")
-        if price is None:
-            return False
-        provider = getattr(agent, "data_provider", None)
-        if provider is None:
-            return True
-        try:
-            truth = provider.get_stock_price(item.get("ticker", "UNKNOWN")).price
-        except Exception:
-            return True
-        return abs(float(price) - float(truth)) / max(abs(float(truth)), 1e-9) < 0.02
-
-    @staticmethod
-    def _quality(report: Any) -> float:
-        if not isinstance(report, StockResearchReport):
-            return 0.0
-        sections = [
-            report.market_analysis,
-            report.news_analysis,
-            report.financial_analysis,
-            report.technical_analysis,
-            report.valuation_analysis,
-            report.risk_analysis,
-        ]
-        filled = sum(1 for s in sections if s and s != _NOT_COVERED)
-        score = filled / len(sections)
-        if not report.summary or not report.conclusion:
-            score *= 0.5
-        return score
