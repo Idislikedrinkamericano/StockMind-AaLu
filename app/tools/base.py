@@ -18,6 +18,10 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class ProviderRateLimitError(RuntimeError):
+    """An upstream rate limit: automatic tool retries must not repeat it."""
+
+
 class DataPoint(BaseModel):
     """A single grounded value with its provenance."""
 

@@ -2630,3 +2630,534 @@ git diff --check
   Provider 唯一变更为本轮复现的 yfinance 报价与 OHLC 有限值处理。
 - 真实 LLM/金融 API 调用仍为 0；没有运行 --execute-real、没有请求费用授权、
   没有以离线结果替代真实验证。P3 真实验收仍阻塞，未进入 P4。
+
+## 2026-11-18 — P3-C：金融数据 Provider 兼容性与限流处理
+
+### 用户完整原始 Prompt
+
+```text
+# StockMind-AaLu — P3-C：金融数据 Provider 兼容性与限流处理
+
+## 一、项目背景
+
+StockMind-AaLu 已完成 P2 离线评估体系，以及 P3 真实环境 Smoke Test 基础设施。
+
+当前基线：
+
+- 最新 Commit：`ac6796f`
+- 完整离线测试：312 passed
+- P2-A：12/12 通过
+- P2-B：11 passed、0 failed、1 unsupported
+- P3 真实 LLM 端到端验收：尚未完成
+- 当前没有可用的 LLM API Key
+- Python 环境：3.12
+- yfinance：1.8.0
+- AkShare：1.20.65
+
+用户已在本地进行真实金融数据测试。
+
+**美股测试：成功**
+
+使用：
+
+```python
+import yfinance as yf
+
+df = yf.Ticker("AAPL").history(period="5d")
+```
+
+成功获取 AAPL 的真实 OHLCV 行情数据。
+
+**A 股测试：发现两个问题**
+
+首先，调用：
+
+```python
+ak.stock_zh_a_hist(...)
+```
+
+出现：
+
+```text
+AttributeError: stock_zh_a_hist 已在 1.20.46 更名为 stock_zh_a_hist_em
+```
+
+随后改用：
+
+```python
+ak.stock_zh_a_hist_em(...)
+```
+
+出现：
+
+```text
+Push2RateLimitError
+```
+
+错误提示东方财富 push2 行情服务器对当前 IP 进行了临时限流，短时间内重复请求可能延长限流时间。
+
+此外，上一阶段 P3 检查曾发现，StockMind 的 A 股适配器可能错误使用了美股行情接口。
+
+本阶段需要检查实际代码，确认问题并进行最小范围修复。
+
+## 二、开发目标
+
+本阶段只处理三个核心问题：
+
+1. 修复 AkShare 新版本接口兼容性。
+2. 修复美股与 A 股的行情接口路由。
+3. 正确识别和处理金融数据源限流。
+
+最终目标是使 StockMind 的 Provider 层具备可靠、可测试、可追溯的数据获取能力。
+
+**本阶段不是新增功能，不开发 Web UI，不修改 Agent 架构。**
+
+## 三、任务 A：检查现有 Provider 架构
+
+首先阅读项目实际代码，重点检查：
+
+- `app/tools/providers.py`
+- 相关行情工具与 symbol 处理逻辑
+- Provider 单元测试
+- `app/evaluation/real_smoke.py`
+- `examples/real_smoke.py`
+- `pyproject.toml`
+
+明确以下问题：
+
+1. 当前美股行情由哪个函数获取？
+2. 当前 A 股行情由哪个函数获取？
+3. `AAPL`、`MSFT`、`600519`、`000001` 如何识别和路由？
+4. A 股代码是否会错误进入美股接口？
+5. 当前是否使用了已废弃的 AkShare API？
+6. Provider 异常如何传递给 Tool 和 ReAct Workflow？
+7. 当前如何区分数据为空、数据无效、请求失败与限流？
+
+必须根据实际代码确认根因，不要仅凭之前的描述直接修改。
+
+优先复用现有架构和数据结构，避免引入新的抽象层。
+
+## 四、任务 B：修复 AkShare 接口兼容性
+
+当前安装的 AkShare 版本为 `1.20.65`。
+
+旧接口：
+
+```python
+ak.stock_zh_a_hist(...)
+```
+
+已更名为：
+
+```python
+ak.stock_zh_a_hist_em(...)
+```
+
+请检查当前安装版本的实际函数签名、参数和返回字段。
+
+允许通过本地代码检查、函数签名和接口元信息完成验证。
+
+**禁止在本阶段调用真实东方财富网络接口。**
+
+针对 A 股历史 OHLCV 数据：
+
+- 使用当前版本支持的正确接口。
+- 正确传递股票代码和日期参数。
+- 适配实际返回的字段名称。
+- 正确处理日期、开盘价、最高价、最低价、收盘价和成交量。
+- 保留真实数据来源信息。
+- 不得用默认值伪造缺失行情。
+- 不得将接口异常解释为正常的空数据。
+
+继续保留已有数据质量检查：
+
+- 拒绝不合法的 NaN、Inf。
+- 拒绝无效的 OHLC 组合。
+- 不得将有效的零值无故覆盖。
+- 不得将数据缺失直接填充为零。
+- 不得改变现有技术指标或估值公式。
+
+如果确实需要兼容不同 AkShare 版本，应采用简单、明确、可测试的方式。
+
+不要为了兼容性增加复杂的动态接口搜索机制。
+
+## 五、任务 C：修复美股与 A 股路由
+
+确保不同市场的股票使用正确的数据接口。
+
+最低测试范围：
+
+| 股票代码 | 市场 | 预期行为 |
+|---|---|---|
+| `AAPL` | 美股 | 使用美股行情接口 |
+| `MSFT` | 美股 | 使用美股行情接口 |
+| `600519` | A 股 | 使用 A 股行情接口 |
+| `000001` | A 股 | 使用 A 股行情接口 |
+
+要求：
+
+1. A 股六位数字代码必须保留前导零。
+2. 不得仅凭股票代码数值大小判断市场。
+3. 不得把 `600519` 当成美国股票代码。
+4. 不得把 `000001` 转换成整数 `1`。
+5. 无法明确识别的代码应返回可解释的错误。
+6. 不得静默切换到错误的市场或数据接口。
+
+检查当前 Provider 的设计：
+
+- 如果已有明确的市场参数，优先使用它。
+- 如果已有 symbol normalization 逻辑，优先修复它。
+- 不要无必要地重构整个路由系统。
+
+本阶段不主动扩展港股、ETF、指数或其他资产类型。
+
+## 六、任务 D：正确处理东方财富限流
+
+用户实际遇到的异常：
+
+```text
+Push2RateLimitError
+```
+
+这代表上游数据服务暂时拒绝请求。
+
+请实现明确的限流错误处理。
+
+要求：
+
+1. 能识别当前 AkShare 版本的限流异常。
+2. 不把限流误判成正常的空行情。
+3. 尽可能复用项目现有的错误类型与状态结构。
+4. 如果确有必要，可以增加 `rate_limited` 错误分类。
+5. 保留适当的错误来源信息，便于调试。
+6. 向上层返回可理解的错误描述。
+7. 不返回虚构行情。
+8. 不自动切换到无关数据源。
+9. 不进行快速、无限或高频重试。
+10. 不通过代理轮换等方式规避数据源限流。
+
+如果现有 Tool 或 Workflow 有错误传播机制，应继续使用。
+
+特别注意：
+
+**Provider 限流或失败不能被最终报告错误标记为一次成功的数据获取。**
+
+如果 Agent 仍能生成部分报告，必须清楚标记缺失数据和未完成的工具调用，不得编造结论。
+
+## 七、任务 E：补充离线回归测试
+
+所有新增测试必须使用 Mock 或其他确定性的离线方式。
+
+不得访问真实金融数据接口。
+
+至少覆盖以下场景：
+
+1. `AAPL` 正确路由至美股接口。
+2. `MSFT` 正确路由至美股接口。
+3. `600519` 正确路由至 A 股接口。
+4. `000001` 保留前导零并正确路由。
+5. AkShare 使用当前支持的历史行情接口。
+6. 正常 A 股 OHLCV 数据能够正确转换。
+7. 空 DataFrame 能够正确处理。
+8. NaN、Inf 数据被正确拒绝。
+9. 无效 OHLC 数据被正确拒绝。
+10. AkShare 限流异常被正确识别。
+11. 限流不会触发无限重试。
+12. 限流不会产生虚假的成功行情。
+13. Provider 错误能够正确传递到工具层。
+14. 现有 ReAct Workflow 状态不发生回归。
+15. 现有 P2/P3 Evaluation 测试保持兼容。
+
+如果 `Push2RateLimitError` 不方便直接实例化，可以使用受控 Mock 模拟相同异常处理路径。
+
+不要为了测试限流而调用真实东方财富接口。
+
+## 八、任务 F：检查 P3 Real Smoke Runner
+
+检查：
+
+- `app/evaluation/real_smoke.py`
+- `examples/real_smoke.py`
+
+确保：
+
+1. `a-share` 案例使用正确的 A 股行情路径。
+2. 默认 Preflight 仍然是离线的。
+3. 未添加 `--execute-real` 时绝不调用真实 API。
+4. 缺少 LLM API Key 时继续明确报告 `blocked`。
+5. Provider 限流必须在结果中体现。
+6. 不能把限流或失败报告成真实 E2E 验收成功。
+7. 尽可能保持现有 Smoke Test 结果格式兼容。
+
+**本阶段禁止执行 `--execute-real`。**
+
+不要声称真实 LLM Agent 已经通过端到端验收。
+
+## 九、任务 G：同步更新项目文档
+
+必须同步更新以下文件：
+
+- `README.md`
+- `README.zh-CN.md`
+- `docs/engineering-notes.md`
+- `docs/engineering-notes.zh-CN.md`
+
+文档内容应准确反映：
+
+- 当前支持的美股与 A 股路由方式
+- AkShare 版本兼容性
+- 东方财富限流处理机制
+- 已完成的离线测试
+- 已验证的真实 yfinance 基础连接
+- 尚未完成的 A 股真实数据验证
+- 尚未完成的真实 LLM E2E 验收
+
+中英文文档应保持内容一致。
+
+不得夸大尚未完成的能力。
+
+### Codex 开发日志
+
+必须向：
+
+`docs/codex-log.md`
+
+**追加**本阶段完整记录，不得覆盖原有日志。
+
+新增记录必须包含：
+
+- 阶段名称：P3-C
+- 本次完整原始开发 Prompt
+- 问题根因
+- 设计决策
+- 修改的文件
+- 实际测试命令
+- 实际测试结果
+- 已知限制
+- 下一步验收事项
+
+不得记录 API Key、Token 或其他敏感信息。
+
+## 十、任务 H：验证
+
+完成代码修改后，依次执行：
+
+1. Provider 相关定向测试。
+2. Real Smoke 相关定向测试。
+3. 完整 `pytest` 测试。
+4. 修改模块的 Python 编译检查。
+5. `git diff --check`。
+6. `git status --short`。
+
+要求：
+
+- 如实报告 passed、failed、skipped。
+- 不得删除失败测试来制造全绿结果。
+- 如果发现历史测试存在不稳定性，单独记录。
+- 不得因为离线测试通过就宣称真实金融接口已经验收成功。
+
+## 十一、严格限制
+
+本阶段必须遵守：
+
+- 不调用付费 LLM。
+- 不调用真实东方财富 API。
+- 不调用真实 yfinance API。
+- 不使用或创建 API Key。
+- 不修改 `.env`。
+- 不进行 Git Commit。
+- 不进行 Git Push。
+- 不开发 Web UI。
+- 不改变核心 ReAct 架构。
+- 不重写报告生成系统。
+- 不修改无关功能。
+- 不增加不必要的依赖。
+
+保持修改范围尽可能小，优先解决已经确认的真实问题。
+
+## 十二、最终交付报告
+
+完成后请用中文输出：
+
+1. **问题根因**：根据实际代码确认了什么？
+2. **实现内容**：具体修复了哪些问题？
+3. **修改文件**：列出全部修改文件。
+4. **测试结果**：提供准确的测试数量与结果。
+5. **市场路由**：美股与 A 股是否通过离线验证？
+6. **限流处理**：如何识别和传播限流错误？
+7. **剩余限制**：哪些真实环境测试仍然未完成？
+8. **Git 状态**：是否可以进入人工 Review 和 Commit？
+
+特别强调：
+
+**本阶段完成的标准是 Provider 兼容性与错误处理通过离线回归测试，而不是完整的真实 Agent E2E 验收。**
+
+完成后停止，等待用户确认，不要自动进入下一阶段。
+```
+
+### 根因与关键决策（摘要）
+
+- 起始工作区干净，HEAD 为 ac6796f。实际仓库仍位于 Downloads，与会话默认可写目录不一致，
+  因而在临时副本准备补丁，沿用项目 .venv；使用此前已授权的 git apply 应用，不覆盖用户修改。
+- 原 AkShare _daily 无市场判断，AAPL、MSFT、600519、000001 全部请求 stock_us_daily；
+  离线复现显示 A 股也生成 USD/Sina 结果。仓库原来没有调用任何 A 股历史接口。
+- 本地 AkShare 1.20.65 实际签名及 renames.json 确认：
+  stock_us_daily -> stock_us_hist_sina，stock_zh_a_hist -> stock_zh_a_hist_em，
+  均在 1.20.46 更名。当前 Push2RateLimitError 继承 ak.RateLimitError，真实类型关系已验证。
+  检查时阻止 requests/curl_cffi/socket 发起外部请求，仅导入/反射，不访问数据接口。
+- 新旧函数名采用显式两分支，只有新函数缺失才用旧函数，不在请求失败后改接口。
+  没有动态搜索、换 Provider、轮换代理或安装新依赖。
+- 代码字符串按支持的 US/沪深 A 股格式路由，000001 不转换成整数。
+  当前支持六位 A 股前缀 000/001/002/003/300/301/600/601/603/605/688，
+  不假定所有六位代码、所有市场、所有资产都受支持。YFinance 裸 A 股请求在 SDK 之前拒绝；
+  A 股财务工具明确不可用，不再调用美股财务端点。
+- A 股日线传 daily、YYYYMMDD 起止日期、正确复权参数，按中文字段转换，使用 CNY/Eastmoney。
+  行情日期及股票代码校验，拒绝重复、越界、NaN/Inf、缺失 OHLCV、无效 OHLC 关系、
+  负数/非整数成交量；保留合法 0。成交量沿用端点单位，不猜测手/股转换。
+  美股历史保留原有跳过无效行策略，并取消缺失成交量填 0。
+- 限流转换为 ProviderRateLimitError，保留 cause 与来源/端点/异常类型。
+  每个 Provider 实例对 Eastmoney 请求串行化，记录已限流来源，阻止排队及后续请求；
+  无全局缓存或自动冷却计时器。必须待上游恢复后明确新建实例。
+- Workflow 仅新增该异常不重试的分支，保留 trace、errors、deadline、CancelledError、
+  State/status 与 checkpoint 契约。原有非限流重试不变。
+- 限流请求不会生成 observation；部分报告 uncertainty 记录限流和未完成工具，
+  no-data 保留错误。finished 仍表示推理循环结束，不等同于全部数据获取成功。
+- Smoke 预检只放开合法 A 股/AkShare 配置，不放开执行开关或凭据要求；
+  A 股来源只接受 Eastmoney，新增 checks.no_rate_limit，部分数据也不能掩盖限流为 pass。
+  既有 JSON 字段保留；P2 Dataset/评分和生产报告 Schema 没有更改。
+- 用户报告的 AAPL 五日真实 yfinance 成功单独注明为用户提供的证据；本阶段没有重复请求。
+  A 股真实行情和 LLM E2E 仍未完成，不把 fixtures 当作真实验收。
+
+### 修改 / 新增文件
+
+- app/tools/providers.py
+- app/tools/base.py
+- app/graph/workflow.py
+- app/reporting/assembler.py
+- app/evaluation/real_smoke.py
+- tests/test_provider_compatibility.py（新增）
+- tests/test_real_smoke.py
+- README.md
+- README.zh-CN.md
+- docs/engineering-notes.md
+- docs/engineering-notes.zh-CN.md
+- docs/codex-log.md（本条追加）
+
+已检查 examples/real_smoke.py、行情工具和 pyproject.toml，无需修改。
+没有修改金融公式、Agent 核心路由、Web、依赖、真实 .env；未 Commit/Push。
+
+### 开发期执行记录
+
+临时副本使用项目既有 Python 3.12.8 / pytest 9.2.0 虚拟环境解释器的绝对路径。
+以下 <project-python> 是该绝对路径的可读缩写。
+
+- 本地 API 检查：在阻止网络调用的 context 中导入 AkShare，打印两个新函数的 inspect.signature，
+  检查 isinstance(Push2RateLimitError(...), ak.RateLimitError) 为 True；
+  两个旧属性均抛出明确的更名 AttributeError。没有调用函数取行情。
+- 离线旧实现复现：四个代码都调用 stock_us_daily，其中 A 股被标注 USD/Sina。
+- <project-python> -m pytest tests/test_provider_compatibility.py tests/test_akshare_provider.py -v -p no:cacheprovider：
+  首次 74 passed / 1 failed。新增测试捕获 yfinance 财务分支在校验 symbol 前取得 SDK 对象，
+  已修复顺序；随后 75 passed / 0 failed / 0 skipped（0.48 s）。
+  后续增加一项美股 API 缺失回归，最终数量由原工作区验收记录给出。
+- <project-python> -m pytest tests/test_real_smoke.py -v -p no:cacheprovider：
+  53 passed / 0 failed / 0 skipped（2.07 s）。
+- <project-python> -m pytest -v -p no:cacheprovider：
+  378 passed / 0 failed / 0 skipped（18.60 s）。
+- <project-python> examples/evaluate.py --suite benchmark --output-dir /tmp/stockmind-p3c-benchmark：
+  completed_with_unsupported；最终指标在原工作区复核后追加。
+- pytest 使用 PYTHONDONTWRITEBYTECODE=1，避免向受限目录写缓存。
+  新增 Provider 测试共 62 项，Smoke 净增 4 项；原有 A 股 unsupported 测试改为正确路由，
+  不是删除安全验证。
+
+### 已知限制与下一步验收
+
+- 本轮只做离线验收，不运行 --execute-real，没有真实 LLM/东方财富/yfinance 调用，
+  不使用或创建真实 API Key，不读取或修改真实 .env。
+- 当前实包 1.20.65 与显式旧名称分支已离线验证，不承诺所有 AkShare 历史版本。
+- A 股仅覆盖明确格式的沪深股票日线，非实时行情；不新增 A 股财务、港股、ETF 或指数能力。
+  证券格式路由不代表已验证上市有效性；成交量原单位需要在未来使用量价指标前核实。
+- 限流阻断仅限同一 Provider 实例；不跨进程、不猜测实际冷却时间，不能强停已执行的
+  同步网络线程。等待上游恢复后，再按用户批准的范围做真实数据验收，禁止高频探测。
+- 上阶段记录过 P2 50 ms 故障预算下的间歇重复性问题，本阶段临时副本全套未复现；
+  未放宽任何预算或断言。
+- 真实 A 股接口仍待限流解除后验收；真实 LLM E2E 仍需后续明确授权及可用凭据。
+  用户已有真实 yfinance 基础连接成功，不等于整个 Provider/Agent 验收完成。
+
+### Git Commit 信息
+
+未 Commit / Push；起始提交 ac6796f 保持不变。
+
+### 原工作区最终验收与实际命令
+
+补丁通过此前授权的 git apply 写入实际仓库，原始工作区在应用前再次确认干净。
+随后按 Provider 定向、Smoke 定向、完整 pytest、编译、diff、status 的顺序执行：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/test_provider_compatibility.py tests/test_akshare_provider.py -v -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/test_real_smoke.py -v -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -v -p no:cacheprovider
+PYTHONPYCACHEPREFIX=/tmp/stockmind-p3c-pycache .venv/bin/python -m compileall -q app/tools/providers.py app/tools/base.py app/graph/workflow.py app/reporting/assembler.py app/evaluation/real_smoke.py tests/test_provider_compatibility.py tests/test_real_smoke.py
+git diff --check
+git status --short
+```
+
+- Provider：76 passed / 0 failed / 0 skipped，0.70 s。
+- Smoke：53 passed / 0 failed / 0 skipped，2.00 s。
+- 第一次原工作区完整 pytest：377 passed / 1 failed / 0 skipped，18.49 s。
+  失败于 tests/test_reliability_evaluation.py::test_repeatability_and_json_with_hostile_environment，
+  两次运行的部分逐案例 checks 不一致，整体 reliability_aggregate 仍相同。
+  这是此前 P3 记录过不稳定现象的同名测试；本轮未确认该次差异的具体根因。
+- 单独执行：
+  `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/test_reliability_evaluation.py::test_repeatability_and_json_with_hostile_environment -vv -p no:cacheprovider`
+  得到 1 passed / 0 failed / 0 skipped，1.16 s。
+- 未修改评分、断言或预算，再次执行上述完整 pytest 命令：
+  **378 passed / 0 failed / 0 skipped，18.28 s**。
+- 修改模块 compileall、git diff --check 均退出 0。
+- 当前 Git 状态：11 个已跟踪文件修改、1 个新增测试文件，总计 12 个文件；
+  HEAD 仍是 ac6796f，没有 Commit 或 Push。
+
+额外核对：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python examples/evaluate.py --suite benchmark --output-dir /tmp/stockmind-p3c-benchmark
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python examples/real_smoke.py --case a-share --output-dir /tmp/stockmind-p3c-preflight
+```
+
+- Benchmark：completed_with_unsupported。P2-A completed/grounded 12/12，macro P/R/F1=1.0；
+  P2-B 11 pass / 0 fail / 1 unsupported，Safe Termination 10/10=100%，
+  Recovery 7/8=87.5%，Safety Violation Count=0。END timeout checkpoint 仍 unsupported。
+  产物为 /tmp/stockmind-p3c-benchmark/evaluation-results.json 和 evaluation-report.md。
+- A 股 CLI 仅预检，退出 2 / blocked。原因仅为未显式启用真实执行和缺 OPENAI_API_KEY，
+  不再包含旧的“不支持 A 股”原因；actual_tool_calls=[]，没有创建最终金融报告。
+  结果为 /tmp/stockmind-p3c-preflight/run-20261118T170500Z-2949c6c4/a-share-result.json。
+- 已核对双语文档相对链接、完整 Prompt、日志原有 121,445 字节。
+  金融公式、Agent 核心路由、State/Checkpoint、报告 Schema、P2 Dataset/评分、
+  Web、依赖及真实 .env 未修改。
+- 未发出真实请求；离线通过不等于真实 A 股或真实 LLM E2E 验收。
+  P3-C 可进入人工 Review，后续 Commit 由用户决定。
+
+### 最终复核补充：禁止可选工具失败被隐藏为 E2E pass
+
+此前 378 项通过后，复核发现：Smoke 必需价格/历史数据全部获取成功时，
+额外财务工具异常仍可能被判为 pass。这与本阶段“不能把失败报告为真实 E2E 成功”的要求不符。
+
+先新增 test_optional_provider_failure_cannot_be_hidden_by_required_data 并执行，
+实际得到 **1 failed**：required_tools 为 True，而 outcome 错误为 pass。
+随后增加 checks.no_unexpected_errors，仅专门的受控故障案例允许精确匹配的预期注入错误；
+其他执行错误均不能 pass。保留独立 no_rate_limit 检查。部分报告还披露
+request_failed/empty_data/invalid_data 等 Provider 错误；没有虚构数据或改 P2 评分。
+
+修复后重新按顺序执行上述 Provider、Smoke、完整 pytest、compileall、diff 和 status 命令：
+
+- Provider：**76 passed / 0 failed / 0 skipped，0.49 s**。
+- Smoke：**54 passed / 0 failed / 0 skipped，1.51 s**。
+- 完整 pytest：**379 passed / 0 failed / 0 skipped，18.26 s**。
+- 修改模块 compileall、git diff --check 均退出 0。
+- 最终净增测试 67 项：62 个 Provider 测试、5 个 Smoke 测试；
+  原有 unsupported-A-share 测试改为新的路由契约，安全开关仍被验证。
+- 重新运行同一 Benchmark CLI，仍为 completed_with_unsupported，
+  P2-A 12/12、P2-B 11 pass / 0 fail / 1 unsupported，
+  Safe Termination 10/10、Recovery 7/8、Safety Violation Count=0。
+- 修改文件清单仍为上述 12 个文件。此前失败和中间通过结果不删除；
+  本段 379 项是最终版本的完整结果。
+- 没有任何真实 API/LLM 调用，没有 --execute-real、Commit 或 Push。

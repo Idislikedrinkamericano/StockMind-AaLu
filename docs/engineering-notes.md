@@ -5,7 +5,142 @@
 This page keeps contributor-oriented implementation details out of the project
 home page.
 
+## Provider Compatibility and Rate Limits (P3-C)
+
+### Confirmed causes and local API inspection
+
+At commit `ac6796f`, AkShare's `_daily` sent every symbol to
+`stock_us_daily`: offline reproduction returned USD/Sina records even for
+600519 and 000001. No A-share endpoint existed in the adapter; the project was
+not calling the deprecated A-share function. Smoke preflight therefore blocked
+bare six-digit symbols. Generic workflow retries also repeated rate-limit errors,
+and the US financial helpers swallowed request exceptions as unavailable fields.
+
+Local inspection of the installed **AkShare 1.20.65** verified both renames
+(since 1.20.46) and signatures, without network requests:
+
+- `stock_us_hist_sina(symbol="FB", period="daily", adjust="")` replaces `stock_us_daily`.
+- `stock_zh_a_hist_em(symbol="000001", period="daily", start_date="19700101", end_date="20500101", adjust="")`
+  replaces `stock_zh_a_hist`.
+- `akshare.utils.http.Push2RateLimitError` is a subclass of exported
+  `akshare.RateLimitError`, as well as requests' ConnectionError.
+
+Only these explicit old-name fallbacks exist. They are used when the new function
+is absent, never after it raises. Offline fixtures cover both branches; this is
+not a guarantee that every older AkShare release behaves identically. No dependency
+versions were changed or packages installed. Local yfinance is **1.8.0**.
+
+### Market routing and normalization
+
+| Symbol | yfinance | AkShare |
+| --- | --- | --- |
+| AAPL / MSFT | Ticker price/history/info | Sina US daily endpoint |
+| 600519 / 000001 | Reject bare A-share code before SDK access | Eastmoney A-share daily endpoint |
+
+Normalization requires strings, strips surrounding whitespace and uppercases US
+symbols; it never converts numeric codes to integers. Supported syntax is US
+letters (1–5, optional class suffix such as BRK.B/BRK-B), or six ASCII digits with
+prefixes 000/001/002/003/300/301/600/601/603/605/688. Unsupported or ambiguous formats
+are errors; this is syntax routing, not proof of listing validity or security type.
+No Hong Kong, index, ETF or other-asset support is added.
+
+AkShare handles daily bars only (`interval=1d`). A-share start/end dates use
+YYYYMMDD and the Asia/Shanghai calendar. Recognized lookbacks are 1d, 5d, 1mo, 3mo,
+6mo, 1y, 2y and 5y, interpreted as calendar-day windows, not trading-day counts.
+History requests forward-adjusted `qfq`; quotes use the latest unadjusted daily
+close in a one-month calendar window and retain its actual `as_of` date.
+Neither is a real-time quote. Prices are CNY, with source `akshare/eastmoney`;
+US data retains USD and `akshare/sina`.
+
+Chinese columns 日期/开盘/最高/最低/收盘/成交量 map to the existing PriceBar.
+Dates and optional 股票代码 must agree with the request; duplicate/out-of-window
+dates, missing fields, NaN/Inf, negative prices/volume, fractional volume and
+invalid OHLC ordering are rejected. Valid zeros remain zeros. A-share bars are
+sorted; invalid A-share rows fail the request rather than filling/interpolating.
+Existing US history keeps its invalid-row skipping policy, now also rejecting
+invalid OHLC combinations and missing/invalid volume instead of filling volume
+with zero. All-invalid US history raises. Volume stays in endpoint units, disclosed
+in notes; no share/lot conversion is guessed.
+
+A-share financial statements/key statistics remain explicitly unavailable;
+they never query US financial or valuation endpoints. Financial formulas,
+debt mapping, period metadata and DCF semantics are unchanged.
+
+### Rate limits, errors and partial reports
+
+Empty data, invalid data, request failures and rate limits remain distinct:
+`empty_data`, `invalid_data`, `request_failed`, and `rate_limited` messages.
+Existing empty US-financial tables still yield missing fields; actual request
+exceptions now propagate instead of being swallowed.
+
+The adapter recognizes AkShare's exported exception base (including Push2) and
+raises `ProviderRateLimitError`, retaining the original exception as cause and
+source/endpoint/type in the error. Eastmoney requests are serialized within one
+Provider instance. A recognized limit latches the source for that instance:
+already queued and subsequent calls fail locally. There is no global cache,
+background retry, guessed cooldown timer, proxy rotation or automatic source switch.
+An operator must wait for upstream recovery before intentionally constructing a
+new provider. Already-running requests and other processes cannot be cancelled
+by this latch; no global IP-level protection is claimed.
+
+The existing workflow records the failed attempt and tool-result error, then
+skips retry/backoff for this error type even if tool_retries is positive.
+Other retries, deadlines, cancellation, checkpoint and State/status semantics
+are unchanged. Failed requests produce no observation. Partial reports append
+classified Provider errors, including the rate-limit tool name, to uncertainty and keep missing
+data unavailable; safe no-data reports also retain the error. A `finished`
+workflow means the reasoning loop ended normally, not that every fetch succeeded.
+
+The Smoke runner accepts A-share/AkShare routing, retains the offline preflight
+and credential gate, and requires Eastmoney provenance for A-share observations.
+Its additive `checks.no_rate_limit` rejects a live-validation pass if any rate
+limit was recorded, even with sufficient other data. The additional
+`checks.no_unexpected_errors` rejects any unexpected execution error, including
+an optional financial-tool failure after required market data succeeded.
+Only the dedicated controlled-outage case may accept its exact injected error;
+it must still demonstrate the specified safe degradation. This false-pass path
+was reproduced by a failing regression before the fix. Existing JSON fields and
+production report schemas are preserved. P2 scoring is unchanged.
+
+### Verification and remaining live acceptance
+
+- Final original-workspace verification after the false-pass fix: Provider
+  **76 passed** (0.49 s), Smoke **54 passed** (1.51 s), full suite
+  **379 passed, 0 failed, 0 skipped** (18.26 s). Modified-module compileall and
+  git diff --check passed; earlier runs and the intermittent failure are retained below.
+- Offline additions: 62 Provider compatibility tests and five additional Smoke
+  cases; the old unsupported-A-share test now verifies the correct routing.
+  Coverage includes both markets and API names, OHLCV quality, zero preservation,
+  missing fields, exceptions, current rate-limit inheritance, concurrent calls,
+  retry suppression, source isolation, safe partial/no-data reports and Smoke failures.
+- Temporary-copy full regression: **378 passed, 0 failed, 0 skipped** (18.60 s).
+  An initial new test exposed SDK-object access before financial-symbol validation;
+  it was fixed by validating first. No existing failing assertion was removed.
+  Original-workspace commands/results are appended in the Codex log.
+- Original-workspace checks before the final Smoke false-pass fix: Provider **76 passed** (0.70 s), Smoke
+  **53 passed** (2.00 s), full suite **378 passed, 0 failed, 0 skipped** (18.28 s).
+  An earlier full run was 377 passed / 1 failed in the already-recorded P2
+  repeatability test; isolated rerun was 1 passed (1.16 s). The discrepancy was
+  preserved, not hidden or solved by weakening assertions; its root cause remains
+  unconfirmed. Modified-module compileall and git diff --check passed.
+- Rerun Benchmark: baseline completion/grounding 12/12 and macro P/R/F1 1.0;
+  reliability 11 pass / 0 fail / 1 unsupported, safe termination 10/10,
+  recovery 7/8 and safety violations 0. Offline A-share CLI preflight exits 2
+  with no tool calls: explicit execution is disabled and OPENAI_API_KEY is missing.
+- The user reported successful real `yf.Ticker("AAPL").history(period="5d")`.
+  This is user-supplied evidence of basic connectivity, not an execution by this
+  phase or a full financial-data/Agent validation.
+- The user's real A-share request hit Push2RateLimitError. A-share live data and
+  real LLM E2E acceptance remain incomplete. This phase made **zero real financial
+  or LLM requests**, never ran `--execute-real`, and did not read/change `.env`.
+- Provider-thread cancellation and exact upstream cooldown remain unverified.
+  The previous P3 intermittent P2 repeatability failures remain historical records;
+  no test budgets or assertions were loosened.
+
 ## Real-World Validation (P3)
+
+This section preserves the initial P3 snapshot. Current market routing, installed
+Provider packages and rate-limit behavior are described in P3-C above.
 
 ### Audit and execution architecture
 

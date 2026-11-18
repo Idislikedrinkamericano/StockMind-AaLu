@@ -10,7 +10,8 @@ from langchain_core.messages import AIMessage
 
 from app.evaluation import real_smoke as smoke
 from app.models.demo import ScriptedReActDemoModel
-from app.tools.providers import YFinanceMarketDataProvider
+from app.tools.providers import AkShareMarketDataProvider, YFinanceMarketDataProvider
+from app.tools.base import ProviderRateLimitError
 
 
 @pytest.fixture(autouse=True)
@@ -115,11 +116,62 @@ def test_unsafe_base_url_rejected(ready, monkeypatch, url):
     assert url not in json.dumps(reasons)
 
 
-def test_a_share_is_blocked_before_us_endpoint(ready, monkeypatch):
-    monkeypatch.setattr(smoke, "_build_agent", lambda *a: pytest.fail("unsupported market"))
-    result = run(smoke.default_cases()[2], execute_real=True)
+def test_a_share_preflight_routes_only_to_akshare(ready):
+    case = smoke.default_cases()[2]
+    config = smoke.SmokeConfig.from_environment()
+    assert smoke.preflight(case, config, execute_real=True) == []
+    wrong_provider = case.model_copy(update={"financial_provider": "yfinance"})
+    assert any("requires the AkShare" in reason for reason in
+               smoke.preflight(wrong_provider, config, execute_real=True))
+
+
+def test_a_share_still_blocked_without_key_or_explicit_flag(ready, monkeypatch):
+    case = smoke.default_cases()[2]
+    monkeypatch.setattr(smoke, "_build_agent", lambda *a: pytest.fail("must stay offline"))
+    assert run(case)["outcome"] == "blocked"
+    monkeypatch.delenv("OPENAI_API_KEY")
+    result = run(case, execute_real=True)
     assert result["outcome"] == "blocked"
-    assert any("US endpoints" in reason for reason in result["warnings"])
+    assert "Missing credential: OPENAI_API_KEY" in result["warnings"]
+
+
+def test_a_share_smoke_uses_actual_provider_routing_with_offline_boundaries(ready, monkeypatch):
+    from datetime import datetime, timezone
+    monkeypatch.setattr("app.tools.providers.utc_now", lambda: datetime(2026, 11, 18, tzinfo=timezone.utc))
+    calls = []
+    def a_history(symbol, period, start_date, end_date, adjust):
+        calls.append(symbol)
+        return pd.DataFrame([{
+            "日期": day.date(), "股票代码": symbol, "开盘": 10 + i, "最高": 12 + i,
+            "最低": 9 + i, "收盘": 11 + i, "成交量": 1000 + i,
+        } for i, day in enumerate(pd.date_range("2026-10-20", periods=25))])
+    fake = SimpleNamespace(stock_zh_a_hist_em=a_history,
+                           stock_us_hist_sina=lambda **kw: pytest.fail("wrong market"))
+    monkeypatch.setattr(AkShareMarketDataProvider, "_ak", lambda self: fake)
+    script(monkeypatch, [("get_stock_price", "600519"), ("get_historical_prices", "600519"),
+                         ("calculate_rsi", "600519")])
+    result = run(smoke.default_cases()[2], execute_real=True)
+    assert result["outcome"] == "pass"  # Offline boundary stubs, never a real E2E claim.
+    assert calls == ["600519"] * 3
+    assert all(item["available"] for item in result["source_availability"])
+    assert result["final_report"]["key_metrics"]["price"] == 35
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_rate_limit_is_explicit_and_fails_smoke_even_with_partial_data(ready, provider, monkeypatch, partial):
+    def limited(*a, **kw):
+        raise ProviderRateLimitError("rate_limited: fixture upstream cooldown")
+    monkeypatch.setattr(YFinanceMarketDataProvider, "get_income_statement", limited)
+    calls = [("get_stock_price", "MSFT"), ("get_historical_prices", "MSFT")] if partial else []
+    script(monkeypatch, [*calls, ("get_income_statement", "MSFT")])
+    result = run(smoke.default_cases()[1], execute_real=True)
+    assert result["outcome"] == "fail" and result["execution_status"] == "finished"
+    assert not result["checks"]["no_rate_limit"]
+    assert "no_rate_limit" in result["failure_reasons"]
+    assert any("rate_limited:" in text for text in result["errors"])
+    assert any("rate_limited:" in text for text in result["final_report"]["uncertainty"])
+    assert len(result["actual_tool_calls"]) == (3 if partial else 1)
+    assert json.loads(json.dumps(result, allow_nan=False))["outcome"] == "fail"
 
 
 def test_real_factory_options_and_grounded_workflow(ready, provider, monkeypatch):
@@ -202,6 +254,20 @@ def test_msft_requires_financial_and_technical_evidence(ready, provider, monkeyp
     script(monkeypatch, [("get_stock_price", "MSFT"), ("get_historical_prices", "MSFT"),
                          ("calculate_rsi", "MSFT"), ("get_income_statement", "MSFT")])
     assert run(case, execute_real=True)["outcome"] == "pass"
+
+
+def test_optional_provider_failure_cannot_be_hidden_by_required_data(ready, provider, monkeypatch):
+    def unavailable(*args):
+        raise RuntimeError("request_failed: fixture income statement unavailable")
+    monkeypatch.setattr(YFinanceMarketDataProvider, "get_income_statement", unavailable)
+    script(monkeypatch, [("get_stock_price", "AAPL"), ("get_historical_prices", "AAPL"),
+                         ("get_income_statement", "AAPL")])
+    result = run(execute_real=True)
+    assert result["checks"]["required_tools"]  # The required quote/history really succeeded.
+    assert result["outcome"] == "fail"
+    assert not result["checks"]["no_unexpected_errors"]
+    assert any("request_failed:" in text for text in result["final_report"]["uncertainty"])
+    assert result["final_report"]["key_metrics"]["price"] == 150
 
 
 def test_mock_sources_cannot_pass_real_smoke(ready, provider, monkeypatch):

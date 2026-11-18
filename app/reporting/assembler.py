@@ -179,6 +179,11 @@ def build_grounded_report(state: dict[str, Any], language: str = "en") -> StockR
     uncertainty = [
         "This report was assembled deterministically from valid tool observations; unsupported LLM claims were not used."
     ]
+    uncertainty.extend(
+        f"Tool request incomplete; data unavailable: {error}"
+        for error in state.get("errors", [])
+        if any(kind in error for kind in ("rate_limited:", "request_failed:", "empty_data:", "invalid_data:"))
+    )
     # Preserve financial semantics through the deterministic final-report path.
     key_metrics["financial_metadata"] = {
         name: {key: payload.get(key) for key in

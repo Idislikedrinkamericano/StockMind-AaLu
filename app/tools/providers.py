@@ -15,13 +15,35 @@ import hashlib
 import math
 import os
 import random
+import re
+import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
-from app.tools.base import utc_now
+from app.tools.base import ProviderRateLimitError, utc_now
+
+
+def normalize_stock_symbol(ticker: str) -> tuple[str, str]:
+    """Recognize supported stock syntax, not listing validity or instrument type."""
+    if not isinstance(ticker, str):
+        raise ValueError("unsupported_symbol: stock codes must be strings; preserve leading zeros")
+    symbol = ticker.strip().upper()
+    if re.fullmatch(r"(?:00[0-3]|30[01]|60[0135]|688)[0-9]{3}", symbol):
+        return symbol, "CN"
+    if re.fullmatch(r"[A-Z]{1,5}(?:[.-][A-Z])?", symbol):
+        return symbol, "US"
+    raise ValueError(f"unsupported_symbol: {symbol!r}; use a US stock symbol or supported six-digit Shanghai/Shenzhen A-share code")
+
+
+def _us_stock_symbol(ticker: str) -> str:
+    symbol, market = normalize_stock_symbol(ticker)
+    if market != "US":
+        raise ValueError("unsupported_market: this endpoint is US-only; use AkShare for A-share daily prices")
+    return symbol
 
 
 def _as_float(value: Any) -> float | None:
@@ -460,7 +482,7 @@ class YFinanceMarketDataProvider(MarketDataProvider):
         return yfinance
 
     def get_stock_price(self, ticker: str) -> StockPriceResult:
-        symbol = ticker.upper().strip()
+        symbol = _us_stock_symbol(ticker)
         t = self._yf().Ticker(symbol)
         price = None
         currency = "USD"
@@ -491,7 +513,7 @@ class YFinanceMarketDataProvider(MarketDataProvider):
     def get_historical_prices(
         self, ticker: str, period: str, interval: str
     ) -> HistoricalPricesResult:
-        symbol = ticker.upper().strip()
+        symbol = _us_stock_symbol(ticker)
         df = self._yf().Ticker(symbol).history(period=period, interval=interval, auto_adjust=True)
         if df is None or df.empty:
             raise ValueError(f"No historical data found for ticker {symbol!r}")
@@ -560,7 +582,8 @@ class YFinanceMarketDataProvider(MarketDataProvider):
         )
 
     def _info(self, ticker: str) -> dict[str, Any]:
-        return self._yf().Ticker(ticker).info or {}
+        symbol = _us_stock_symbol(ticker)
+        return self._yf().Ticker(symbol).info or {}
 
     def get_income_statement(self, ticker: str) -> IncomeStatement:
         symbol = ticker.upper().strip()
@@ -623,16 +646,45 @@ class YFinanceMarketDataProvider(MarketDataProvider):
 
 
 class AkShareMarketDataProvider(MarketDataProvider):
-    """US stock data via ``akshare`` (Sina), reachable from mainland China.
+    """US daily data via Sina, Shanghai/Shenzhen A-share daily data via Eastmoney.
 
-    Uses a single-ticker daily endpoint (``stock_us_daily``) so lookups are
-    fast and don't require fetching the full market list. Covers latest daily
-    close and history. Key stats / financials / news are not exposed by this
-    endpoint, so those degrade to N/A.
+    Financial endpoints remain US-only. Rate limits latch per provider instance
+    and source; callers must wait for upstream recovery before creating a new one.
     """
 
     SOURCE = "akshare/sina"
-    NOTE = "US stock daily data via akshare (Sina); ~15 min delayed, not real-time."
+    NOTE = "US stock daily data via akshare (Sina); not a live quote."
+    A_SOURCE = "akshare/eastmoney"
+    A_NOTE = ("A-share daily OHLCV via akshare (Eastmoney); price currency CNY, not a live quote. "
+              "Volume retained in endpoint units; no share/lot conversion inferred.")
+
+    def __init__(self) -> None:
+        self._rate_limits: dict[str, ProviderRateLimitError] = {}
+        # Serialize Eastmoney requests so queued tools do not hit a known ban.
+        self._eastmoney_lock = threading.Lock()
+
+    def _request(self, ak: Any, function: Any, operation: str, source: str, **kwargs) -> Any:
+        def request():
+            if source in self._rate_limits:
+                raise self._rate_limits[source]
+            try:
+                return function(**kwargs)
+            except Exception as exc:
+                # Push2RateLimitError inherits the exported AkShare RateLimitError.
+                if isinstance(exc, getattr(ak, "RateLimitError", ())):
+                    error = ProviderRateLimitError(
+                        f"rate_limited: {source} {operation}: {type(exc).__name__}; "
+                        "stop requests and wait for upstream cooldown; automatic retry disabled"
+                    )
+                    self._rate_limits[source] = error
+                    raise error from exc
+                raise RuntimeError(
+                    f"request_failed: {source} {operation}: {type(exc).__name__}: {exc}"
+                ) from exc
+        if source == self.A_SOURCE:
+            with self._eastmoney_lock:
+                return request()
+        return request()
 
     def _ak(self) -> Any:
         try:
@@ -657,10 +709,75 @@ class AkShareMarketDataProvider(MarketDataProvider):
         }.get(period, 180)
 
     def _daily(self, ticker: str, adjust: str) -> Any:
-        return self._ak().stock_us_daily(symbol=ticker.upper().strip(), adjust=adjust)
+        symbol = _us_stock_symbol(ticker)
+        ak = self._ak()
+        function = getattr(ak, "stock_us_hist_sina", None)
+        if function is not None:
+            return self._request(ak, function, "stock_us_hist_sina", self.SOURCE,
+                                 symbol=symbol, period="daily", adjust=adjust)
+        # Explicit legacy name only. Never retry a failed new API using the old one.
+        function = getattr(ak, "stock_us_daily", None)
+        if function is None:
+            raise RuntimeError("unsupported_api: AkShare exposes neither stock_us_hist_sina nor stock_us_daily")
+        return self._request(ak, function, "stock_us_daily", self.SOURCE,
+                             symbol=symbol, adjust=adjust)
+
+    @staticmethod
+    def _valid_bar(open_, high, low, close, volume) -> bool:
+        if any(value is None for value in (open_, high, low, close, volume)):
+            return False
+        return (0 <= low <= min(open_, close) <= max(open_, close) <= high
+                and volume >= 0 and volume.is_integer())
+
+    def _a_share_bars(self, symbol: str, period: str, adjust: str) -> list[PriceBar]:
+        periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"}
+        if period not in periods:
+            raise ValueError(f"unsupported_period: {period!r}; daily A-share lookback required")
+        end = utc_now().astimezone(ZoneInfo("Asia/Shanghai")).date()
+        start = end - timedelta(days=self._period_days(period))
+        ak = self._ak()
+        function = getattr(ak, "stock_zh_a_hist_em", None)
+        operation = "stock_zh_a_hist_em"
+        if function is None:
+            function = getattr(ak, "stock_zh_a_hist", None)
+            operation = "stock_zh_a_hist"
+        if function is None:
+            raise RuntimeError("unsupported_api: AkShare exposes neither stock_zh_a_hist_em nor stock_zh_a_hist")
+        df = self._request(ak, function, operation, self.A_SOURCE, symbol=symbol,
+                           period="daily", start_date=start.strftime("%Y%m%d"),
+                           end_date=end.strftime("%Y%m%d"), adjust=adjust)
+        if df is None or df.empty:
+            raise ValueError(f"empty_data: {self.A_SOURCE} has no daily OHLCV for {symbol}")
+        required = {"日期", "开盘", "最高", "最低", "收盘", "成交量"}
+        if not required <= set(df.columns):
+            raise ValueError(f"invalid_data: {self.A_SOURCE} missing OHLCV columns for {symbol}")
+        bars = []
+        seen_dates = set()
+        for _, row in df.iterrows():
+            if "股票代码" in df.columns and row["股票代码"] != symbol:
+                raise ValueError(f"invalid_data: {self.A_SOURCE} observation ticker mismatch for {symbol}")
+            try:
+                day = datetime.strptime(str(row["日期"])[:10], "%Y-%m-%d").date()
+            except ValueError as exc:
+                raise ValueError(f"invalid_data: {self.A_SOURCE} invalid OHLCV date for {symbol}") from exc
+            values = [_as_float(row[key]) for key in ("开盘", "最高", "最低", "收盘", "成交量")]
+            if not self._valid_bar(*values) or not start <= day <= end or day in seen_dates:
+                raise ValueError(f"invalid_data: {self.A_SOURCE} invalid OHLCV row for {symbol} on {day}")
+            seen_dates.add(day)
+            bars.append(PriceBar(date=day.isoformat(), open=values[0], high=values[1],
+                                 low=values[2], close=values[3], volume=int(values[4])))
+        return sorted(bars, key=lambda bar: bar.date)
 
     def get_stock_price(self, ticker: str) -> StockPriceResult:
-        symbol = ticker.upper().strip()
+        symbol, market = normalize_stock_symbol(ticker)
+        if market == "CN":
+            # A calendar month accommodates weekends/holidays; disclose the actual last date.
+            latest = self._a_share_bars(symbol, "1mo", adjust="")[-1]
+            return StockPriceResult(
+                ticker=symbol, price=latest.close, currency="CNY", source=self.A_SOURCE,
+                timestamp=utc_now(), data_period="latest available unadjusted daily close",
+                as_of=latest.date, note=self.A_NOTE,
+            )
         df = self._daily(symbol, adjust="")
         if df is None or getattr(df, "empty", True):
             raise ValueError(f"No price found for ticker {symbol!r}")
@@ -681,7 +798,16 @@ class AkShareMarketDataProvider(MarketDataProvider):
     def get_historical_prices(
         self, ticker: str, period: str, interval: str
     ) -> HistoricalPricesResult:
-        symbol = ticker.upper().strip()
+        symbol, market = normalize_stock_symbol(ticker)
+        if interval != "1d":
+            raise ValueError("unsupported_interval: AkShare adapter supports daily (1d) bars only")
+        if market == "CN":
+            bars = self._a_share_bars(symbol, period, adjust="qfq")
+            return HistoricalPricesResult(
+                ticker=symbol, period=period, interval=interval, bars=bars, source=self.A_SOURCE,
+                timestamp=utc_now(), data_period=f"{period} calendar lookback; {bars[0].date} to {bars[-1].date}",
+                note=self.A_NOTE + " Prices are forward-adjusted (qfq).",
+            )
         df = self._daily(symbol, adjust="qfq")
         if df is None or getattr(df, "empty", True):
             raise ValueError(f"No historical data found for ticker {symbol!r}")
@@ -696,10 +822,10 @@ class AkShareMarketDataProvider(MarketDataProvider):
             date_val = row.get("date") or row.get("index")
             # PriceBar has non-optional OHLC fields. Never replace a missing or
             # invalid value with zero: omit the entire unusable bar instead.
-            if None in (open_, high, low, close) or date_val is None:
+            volume = _as_float(row.get("volume"))
+            if not self._valid_bar(open_, high, low, close, volume) or date_val is None:
                 skipped_rows += 1
                 continue
-            volume = _as_float(row.get("volume"))
             bars.append(
                 PriceBar(
                     date=str(date_val)[:10],
@@ -707,14 +833,14 @@ class AkShareMarketDataProvider(MarketDataProvider):
                     high=float(high),
                     low=float(low),
                     close=float(close),
-                    volume=int(volume) if volume is not None else 0,
+                    volume=int(volume),
                 )
             )
         if not bars:
             raise ValueError(f"No valid historical OHLC data found for ticker {symbol!r}")
         note = self.NOTE
         if skipped_rows:
-            note += f" Skipped {skipped_rows} row(s) with missing or invalid OHLC values."
+            note += f" Skipped {skipped_rows} row(s) with missing or invalid OHLCV values."
         return HistoricalPricesResult(
             ticker=symbol,
             period=period,
@@ -728,12 +854,10 @@ class AkShareMarketDataProvider(MarketDataProvider):
 
     def _report_data(self, ticker: str, statement: str) -> tuple[dict[str, float | None], dict[str, Any]]:
         """Latest annual report as ``{ITEM_NAME: AMOUNT}`` (best-effort)."""
-        try:
-            df = self._ak().stock_financial_us_report_em(
-                stock=ticker.upper().strip(), symbol=statement, indicator="年报"
-            )
-        except Exception:
-            return {}, {}
+        symbol = _us_stock_symbol(ticker)
+        ak = self._ak()
+        df = self._request(ak, ak.stock_financial_us_report_em, "stock_financial_us_report_em",
+                           self.A_SOURCE, stock=symbol, symbol=statement, indicator="年报")
         if df is None or getattr(df, "empty", True):
             return {}, {}
         if "REPORT_DATE" not in df or df["REPORT_DATE"].dropna().empty:
@@ -783,19 +907,17 @@ class AkShareMarketDataProvider(MarketDataProvider):
         return short_term + long_term
 
     def _valuation_point(self, ticker: str, indicator: str) -> tuple[float | None, str | None]:
-        try:
-            df = self._ak().stock_us_valuation_baidu(
-                symbol=ticker.upper().strip(), indicator=indicator, period="近一年"
-            )
-            if df is not None and not getattr(df, "empty", True):
-                date = df.iloc[-1].get("date")
-                return _as_float(df["value"].iloc[-1]), str(date) if date is not None else None
-        except Exception:
-            return None, None
+        symbol = _us_stock_symbol(ticker)
+        ak = self._ak()
+        df = self._request(ak, ak.stock_us_valuation_baidu, "stock_us_valuation_baidu",
+                           "akshare/baidu", symbol=symbol, indicator=indicator, period="近一年")
+        if df is not None and not getattr(df, "empty", True):
+            date = df.iloc[-1].get("date")
+            return _as_float(df["value"].iloc[-1]), str(date) if date is not None else None
         return None, None
 
     def get_key_stats(self, ticker: str) -> KeyStats:
-        symbol = ticker.upper().strip()
+        symbol = _us_stock_symbol(ticker)
         quote = self.get_stock_price(symbol)
         price = quote.price
         market_cap, cap_date = self._valuation_point(symbol, "总市值")

@@ -4,7 +4,117 @@
 
 本页保留面向贡献者的实现细节，避免项目主页变成开发记录。
 
+## Provider 兼容性与限流（P3-C）
+
+### 确认的根因与本地接口检查
+
+在 `ac6796f` 中，AkShare 的 `_daily` 将全部股票代码送到 `stock_us_daily`；
+离线复现中，600519 和 000001 也返回 USD/Sina 数据。适配器原本没有 A 股接口，
+并非仓库调用了废弃的 A 股函数，因此 Smoke 预检一直阻止六位代码。
+通用工具重试还会重复限流请求，美股财务辅助函数则把请求异常吞成缺失字段。
+
+本地安装的 **AkShare 1.20.65** 源码及实际函数签名确认两组改名均始于 1.20.46，
+检查过程中没有请求网络：
+
+- `stock_us_hist_sina(symbol="FB", period="daily", adjust="")` 替代 `stock_us_daily`。
+- `stock_zh_a_hist_em(symbol="000001", period="daily", start_date="19700101", end_date="20500101", adjust="")`
+  替代 `stock_zh_a_hist`。
+- `akshare.utils.http.Push2RateLimitError` 继承顶层导出的
+  `akshare.RateLimitError`，同时也是 requests ConnectionError 的子类。
+
+只保留这两组明确的旧名称兼容分支；仅当新函数不存在时启用，不在请求报错后改用旧函数。
+离线 fixtures 覆盖新旧分支，但不承诺所有旧版本行为一致。没有修改依赖版本或安装包，
+本地 yfinance 为 **1.8.0**。
+
+### 市场路由与标准化
+
+| 代码 | yfinance | AkShare |
+| --- | --- | --- |
+| AAPL / MSFT | Ticker 报价/历史/info | Sina 美股日线 |
+| 600519 / 000001 | 接触 SDK 前拒绝裸 A 股代码 | Eastmoney A 股日线 |
+
+标准化要求字符串，去除两端空格，美股字母转大写，不将数字代码转为整数。
+支持格式为 1–5 位美股字母及可选类别后缀（如 BRK.B/BRK-B），或以
+000/001/002/003/300/301/600/601/603/605/688 开头的六位 ASCII 数字代码。
+不支持或含糊的格式明确报错；这只是格式路由，不验证上市有效性或证券类别。
+未新增港股、指数、ETF 或其他资产支持。
+
+AkShare 只提供本适配器的日线（`interval=1d`）。A 股起止日期使用 Asia/Shanghai
+日历和 YYYYMMDD。支持 1d、5d、1mo、3mo、6mo、1y、2y、5y 回看窗口，
+含义为日历天数而非交易日数量。历史请求前复权 `qfq`；报价取一个月日历窗口中
+最近的未复权日收盘价，保留实际 `as_of` 日期，均不等于实时行情。
+A 股币种 CNY、来源 `akshare/eastmoney`；美股保留 USD 和 `akshare/sina`。
+
+中文日期/开盘/最高/最低/收盘/成交量映射到既有 PriceBar。日期及可选股票代码必须
+与请求一致；重复/越界日期、缺列、NaN/Inf、负价格/成交量、非整数成交量及无效
+OHLC 关系均拒绝，合法零值保留。A 股按日期排序，存在无效行时整个请求报错，
+不填充或插值。美股历史保留原有跳过无效行的策略，并补充 OHLC 关系及成交量检查，
+不再把缺失成交量填零；全部行无效则报错。成交量保留端点原单位并在 note 披露，
+不猜测股/手转换。
+
+A 股财报及 Key Stats 仍明确不可用，不会请求美股财务或估值端点。
+金融公式、债务映射、期间元数据与 DCF 语义未改。
+
+### 限流、错误和部分报告
+
+空数据、无效数据、请求失败和限流分别保留 `empty_data`、
+`invalid_data`、`request_failed`、`rate_limited` 错误说明。
+原有美股财务空表仍产生缺失字段；实际请求异常会向上传播，不再被吞掉。
+
+适配器识别 AkShare 导出的异常基类（含 Push2），转换为
+`ProviderRateLimitError`，保留原异常 cause 及来源/端点/类型。
+同一 Provider 实例的 Eastmoney 请求串行执行；识别限流后，该实例记录受限来源，
+已排队和后续调用直接在本地失败。没有全局缓存、后台重试、猜测的冷却计时器、
+代理轮换或自动切换数据源。操作者应等待上游恢复后，再明确新建 Provider。
+此机制不能取消已开始的请求或其他进程的请求，不是全局 IP 限流保护。
+
+既有 Workflow 记录失败 attempt 与 tool-result error；即使 tool_retries 为正，
+该异常也不触发重试或退避等待。其他重试、deadline、取消、checkpoint 和 State/status
+语义不变。失败请求不产生 observation。部分报告在 uncertainty 中披露已分类的
+Provider 错误（包括限流的未完成工具名称），缺失数据仍为 unavailable；
+安全 no-data 报告也保留错误。
+`finished` 表示推理循环正常结束，不表示所有数据获取成功。
+
+Smoke 支持 A 股/AkShare 路由，保留离线预检和凭据开关，要求 A 股 observation
+来自 Eastmoney。新增 `checks.no_rate_limit`：只要记录过限流，即使其他数据
+足够，也不能判为真实验证 pass。`checks.no_unexpected_errors` 还会拒绝任何
+未预期执行错误，包括必需行情已成功但额外财务工具失败的情况；
+只有专门的受控故障案例可接受其精确匹配的预期注入错误，且仍需验证安全降级。
+这一错误 pass 路径先由失败回归复现，再完成修复。既有 JSON 字段和生产报告 Schema 保留，
+P2 评分没有修改。
+
+### 验证与剩余真实验收
+
+- 错误 pass 修复后的原工作区最终验收：Provider **76 passed**（0.49 s），
+  Smoke **54 passed**（1.51 s），完整 **379 passed、0 failed、0 skipped**
+  （18.26 s）。修改模块 compileall 与 git diff --check 均通过；
+  下方保留此前运行及间歇性失败记录。
+- 新增 62 项 Provider 兼容性测试和五项额外 Smoke 测试；旧的“不支持 A 股”测试
+  更新为正确路由断言。覆盖市场/API 新旧名称、OHLCV 质量、零值、缺失字段、
+  异常、当前限流继承关系、并发、禁止重试、来源隔离、部分/no-data 报告及 Smoke 失败。
+- 临时副本完整回归：**378 passed、0 failed、0 skipped**（18.60 s）。
+  首次新增测试发现财务代码在 symbol 校验前取得 SDK 对象，已改为先校验。
+  没有删除原有失败断言；原工作区实际命令和结果追加于 Codex 日志。
+- 最终 Smoke 错误 pass 修复前的原工作区验收：Provider **76 passed**（0.70 s），Smoke **53 passed**
+  （2.00 s），完整 **378 passed、0 failed、0 skipped**（18.28 s）。
+  此前一次完整运行是 377 passed / 1 failed，失败为已有历史记录的 P2 重复性测试；
+  单独复测 1 passed（1.16 s）。差异已保留，没有放宽断言，根因仍未确认。
+  修改模块 compileall 与 git diff --check 通过。
+- Benchmark 重跑：基线 completed/grounded 12/12、macro P/R/F1 1.0；
+  可靠性 11 pass / 0 fail / 1 unsupported，安全终止 10/10、恢复 7/8、
+  安全违规 0。A 股离线 CLI 预检退出 2，没有工具调用：
+  未显式启用真实执行，并且缺少 OPENAI_API_KEY。
+- 用户报告 `yf.Ticker("AAPL").history(period="5d")` 已取得真实数据；
+  这是用户提供的基础连接证据，不是本阶段执行结果，也不是完整财务/Agent 验收。
+- 用户的真实 A 股请求出现 Push2RateLimitError；A 股真实行情和真实 LLM E2E
+  验收仍未完成。本阶段真实金融/LLM 请求 **0 次**，未运行 `--execute-real`，
+  没有读取或修改 `.env`。
+- Provider 线程取消与上游实际冷却时间仍未验证。上阶段 P3 的 P2 重复性测试间歇
+  失败保留为历史记录，没有放宽测试预算或断言。
+
 ## 真实执行验证（P3）
+
+本节保留最初 P3 的历史快照；当前市场路由、已安装 Provider 包及限流行为以上方 P3-C 为准。
 
 ### 审计与执行架构
 

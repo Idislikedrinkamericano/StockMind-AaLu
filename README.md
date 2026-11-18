@@ -154,11 +154,19 @@ Token limits are not a monetary cap. Results and safe reports are saved under
 `smoke-results/run-*/` (Git-ignored). Exit codes: 0 all pass, 1 any fail,
 2 blocked with no failures. A report alone is insufficient to pass.
 
-**Live verification is pending:** all four current target cases are blocked
-(missing credentials and optional provider packages). Existing AkShare code uses
-US endpoints; bare A-share `600519` is explicitly unsupported here. Authentication,
-network/rate limits, unavailable fields and incompatible tool-calling endpoints
-may also prevent completion. See [P3 methodology and limitations](docs/engineering-notes.md#real-world-validation-p3).
+Daily stock routing is tested offline: US symbols such as AAPL/MSFT use yfinance
+or AkShare/Sina; supported six-digit Shanghai/Shenzhen A-share codes such as
+600519/000001 use AkShare/Eastmoney, preserving leading zeros. A-share financials
+remain unavailable. AkShare 1.20.65 uses `stock_us_hist_sina` / `stock_zh_a_hist_em`;
+explicit legacy-name fallback applies only when the new function is absent.
+Recognized rate limits stop automatic retries and further requests to that source
+on the same Provider instance; Smoke outcomes retain the failure.
+
+**Live verification is pending:** the user reported a successful real yfinance
+AAPL five-day history request; it was not rerun in this phase. A-share live data
+remains unverified following an Eastmoney rate limit, and real LLM E2E validation
+is still blocked by missing credentials. No live requests were made for P3-C.
+See [Provider compatibility and limits](docs/engineering-notes.md#provider-compatibility-and-rate-limits-p3-c).
 
 
 ### Async Checkpoint Demo

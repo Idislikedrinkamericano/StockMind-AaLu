@@ -31,7 +31,7 @@ from app.graph.state import StockAgentState
 from app.observability.tracing import TraceCollector
 from app.reporting.assembler import build_grounded_report
 from app.schemas.report import StockResearchReport
-from app.tools.base import tool_call_signature
+from app.tools.base import ProviderRateLimitError, tool_call_signature
 
 
 @dataclass
@@ -246,6 +246,7 @@ def _make_tools_node(
     ) -> tuple[str | None, str | None]:
         last_error: str | None = None
         for attempt in range(config.tool_retries + 1):
+            retry_allowed = True
             try:
                 tool_timeout = _bounded_timeout(config.tool_timeout_seconds, state)
             except TimeoutError:
@@ -269,6 +270,9 @@ def _make_tools_node(
                 if (_remaining_run_seconds(state) or 0.0) <= 0:
                     return None, _timeout_error("run_timeout")
                 last_error = _timeout_error("tool_timeout")
+            except ProviderRateLimitError as exc:
+                last_error = f"{type(exc).__name__}: {tool.name}: {exc}"
+                retry_allowed = False
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
 
@@ -280,6 +284,8 @@ def _make_tools_node(
                 latency_ms=(time.perf_counter() - start) * 1000.0,
                 error=last_error,
             )
+            if not retry_allowed:
+                break
             if attempt < config.tool_retries:
                 remaining = _remaining_run_seconds(state)
                 delay = _backoff_delay(attempt, config)

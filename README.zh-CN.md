@@ -143,10 +143,16 @@ python examples/real_smoke.py --ticker MSFT --query "Research price and trends" 
 结果和安全报告存入 Git 已忽略的 `smoke-results/run-*/`。
 退出码：全部 pass 为 0，存在 fail 为 1，无 fail 但存在 blocked 为 2；仅生成报告不算通过。
 
-**真实验证仍待完成：**当前四个目标案例均 blocked（缺少凭据及可选 Provider 包）。
-现有 AkShare 代码使用美股接口，本入口明确不支持裸 A 股代码 `600519`。
-认证、网络/限流、字段缺失及端点不兼容工具调用也可能阻止完成。
-详见 [P3 方法与限制](docs/engineering-notes.zh-CN.md#真实执行验证p3)。
+日线股票路由已通过离线验证：AAPL/MSFT 等美股代码使用 yfinance 或 AkShare/Sina；
+支持的沪深 A 股六位代码（如 600519/000001）使用 AkShare/Eastmoney，保留前导零。
+A 股财务数据仍不可用。AkShare 1.20.65 使用 `stock_us_hist_sina` /
+`stock_zh_a_hist_em`；仅当新函数不存在时才回退到明确的旧名称。
+识别限流后停止自动重试，同一 Provider 实例也不再请求该来源；Smoke 保留失败结果。
+
+**真实验证仍待完成：**用户报告已成功通过真实 yfinance 获取 AAPL 五日历史行情，
+本阶段没有重复该请求。A 股真实数据在东方财富限流后仍未验收，真实 LLM E2E
+仍因缺少凭据而阻塞。P3-C 没有发出真实请求。
+详见 [Provider 兼容性与限流](docs/engineering-notes.zh-CN.md#provider-兼容性与限流p3-c)。
 
 
 ### 异步 Checkpoint 演示

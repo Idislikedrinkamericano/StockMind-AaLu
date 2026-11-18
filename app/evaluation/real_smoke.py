@@ -26,6 +26,7 @@ from app.graph.workflow import AgentConfig
 from app.models.providers import get_chat_model
 from app.observability.tracing import TraceCollector
 from app.tools import build_tools, get_data_provider
+from app.tools.providers import normalize_stock_symbol
 
 TECHNICAL = ["calculate_ma", "calculate_rsi", "calculate_macd", "calculate_volatility", "calculate_drawdown"]
 FINANCIAL = ["get_income_statement", "get_balance_sheet", "get_cash_flow", "get_eps"]
@@ -102,9 +103,12 @@ def preflight(case: SmokeCase, config: SmokeConfig, *, execute_real: bool) -> li
                 reasons.append("Invalid base URL: use HTTP(S) without credentials, query or fragment.")
         except ValueError:
             reasons.append("Invalid base URL.")
-    if re.fullmatch(r"\d{6}", case.ticker):
-        reasons.append("Bare A-share ticker unsupported: existing AkShare adapter uses US endpoints; "
-                       "no automatic market/symbol mapping is performed.")
+    try:
+        _, market = normalize_stock_symbol(case.ticker)
+        if market == "CN" and case.financial_provider != "akshare":
+            reasons.append("A-share daily data requires the AkShare provider, not a bare Yahoo symbol.")
+    except ValueError as exc:
+        reasons.append(str(exc))
     return reasons
 
 
@@ -180,6 +184,8 @@ def assess(case: SmokeCase, state: dict, events: list, *, llm_response_received:
         valid_source = raw_source in (
             {"yfinance"} if case.financial_provider == "yfinance" else
             {"akshare/sina", "akshare/baidu", "akshare/eastmoney", "akshare/baidu + akshare/sina"})
+        if re.fullmatch(r"[0-9]{6}", case.ticker):
+            valid_source = case.financial_provider == "akshare" and raw_source == "akshare/eastmoney"
         usable = matched and valid_source and bool(payload.get("timestamp")) and _available(payload)
         if usable:
             available.add(obs["tool"])
@@ -196,6 +202,11 @@ def assess(case: SmokeCase, state: dict, events: list, *, llm_response_received:
         "observation_tickers": tickers_valid,
         "sourced_data": bool(available),
         "required_tools": all(set(group) & available & executed for group in case.required_tool_groups),
+        "no_rate_limit": not any("rate_limited:" in error for error in state.get("errors", [])),
+        "no_unexpected_errors": all(
+            case.inject_income_failure and error == f"RuntimeError: {OUTAGE}"
+            for error in state.get("errors", [])
+        ),
     }
     if case.inject_income_failure:
         errors = state.get("errors", [])
