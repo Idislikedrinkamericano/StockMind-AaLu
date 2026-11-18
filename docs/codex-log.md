@@ -2154,3 +2154,479 @@ P2-B：**11 pass / 0 fail / 1 unsupported**；Safe Termination **10/10=100%**；
 
 未 Commit / Push，没有新增 Commit ID。22a6d50 为本轮开始前用户已提交的基线。
 
+
+## 2026-11-17 — P3：Real-World End-to-End Validation
+
+日期使用 America/Los_Angeles；UTC 已为 2026-11-18。起始提交为 `c6ed3f1`，
+工作区干净；沿用项目 Python 3.12.8 / pytest 9.2.0，没有安装或升级依赖。
+
+### 用户原始 Prompt（完整）
+
+```text
+# StockMind — P3：Real-World End-to-End Validation
+
+## 一、项目背景
+
+StockMind 已完成：
+
+- P0–P1-D：金融数据、估值和安全报告修复
+- Cleanup-A / Cleanup-B
+- Finalize Optimization
+- P2-A：Agent Evaluation Baseline
+- P2-B：Reliability Evaluation
+- P2-B Fix：Agent Reliability Hardening
+- P2-C：Reproducible Benchmark & Reporting
+
+最新提交：c6ed3f1。
+
+最近完整测试基线：263 passed。
+
+当前离线评估结果：
+
+- P2-A：12/12 completed and grounded
+- P2-B：11 pass、0 fail、1 unsupported
+- Safe Termination Rate：100%（10/10）
+- Recovery Rate：87.5%（7/8）
+- Safety Violation Count：0
+
+这些都是 scripted/offline evaluation，不代表真实模型表现。
+
+本轮将 P3-A 和 P3-B 合并，验证真实 LLM + 真实金融数据 Provider + ReAct Workflow + Grounded Report 的完整执行链路。
+
+目标是发现并解决阻碍真实使用的问题，不扩展新的产品功能。
+
+## 二、首先审计现有真实执行链路
+
+检查：
+
+- Agent / ReAct 实现
+- LangGraph Workflow
+- LLM Client 和配置
+- Tool Registry
+- yfinance Provider
+- AkShare Provider
+- 数据标准化与验证
+- Report Assembler
+- Tracing
+- Checkpoint
+- CLI / Examples
+- 相关测试
+
+确认：
+
+1. 真实 LLM 是否已经能够通过现有配置调用。
+2. 真实 Provider 是否已经连接到 Agent Tools。
+3. 哪些 Example 使用 Scripted Model，哪些是真实模型。
+4. 当前运行是否会静默回退到 Mock。
+5. API Key、Base URL、Model Name 如何配置。
+6. 真实工具调用如何受到 timeout、deadline 和 ticker validation 保护。
+7. 最终报告如何保留数据来源和错误状态。
+
+先输出简短审计结论，再开始修改。
+
+不要因为真实链路存在问题就重新设计 Agent 架构。
+
+## 三、真实 LLM 验证
+
+复用项目现有 LLM 接入方式。
+
+要求：
+
+1. 支持通过环境变量选择已有的真实 LLM Provider。
+2. 尽可能兼容现有 OpenAI-compatible 配置。
+3. 不硬编码 API Key。
+4. 不修改真实 .env。
+5. 不在日志中打印密钥。
+6. 缺少必要配置时明确报错，不静默切换为 Fake Model。
+7. 保留 ReAct 工具选择和调用过程。
+8. 保留现有超时、迭代上限和状态语义。
+9. 不要求模型直接生成未经验证的金融结论。
+10. 最终报告仍由现有 deterministic assembler 生成。
+
+如果当前代码已具备以上能力，直接复用，不增加第二套 LLM Client。
+
+## 四、真实金融数据 Provider 验证
+
+复用现有 yfinance 和 AkShare。
+
+优先覆盖：
+
+- 美股价格与历史行情
+- 美股基础财务数据
+- A 股价格与历史行情
+- 技术指标输入
+- 估值所需数据的可用性
+
+要求：
+
+1. 使用真实 Provider，不允许静默 Mock 回退。
+2. 每个数据点保留实际来源。
+3. 不将 NaN、Inf 或缺失值替换为 0。
+4. 不将不同财务期间的数据混为一谈。
+5. 不将不具备可靠来源的现金流用于 DCF。
+6. Provider 失败时允许部分数据报告。
+7. 错误 ticker 数据必须被拒绝。
+8. 不修改已有金融公式以获得更好结果。
+9. 不声称所有股票和所有市场都已支持。
+10. 不将实时数据验证写成固定的单元测试断言。
+
+如遇外部数据源限制、网络失败或字段缺失，记录真实原因。
+
+## 五、真实端到端 Smoke Test
+
+新增一个清晰的 Real-World Smoke Test 入口。
+
+优先复用现有 CLI 或 Example，避免新增复杂框架。
+
+建议支持：
+
+- 用户指定 ticker
+- 用户输入研究问题
+- 选择已有 LLM 配置
+- 选择真实 Provider
+- 设置合理的总执行 deadline
+- 指定本地输出目录
+
+建议至少尝试以下任务：
+
+### Case 1：美股价格研究
+
+Ticker：AAPL
+
+问题：分析 AAPL 最近的价格表现与趋势，并说明数据来源。
+
+### Case 2：美股综合研究
+
+Ticker：MSFT
+
+问题：结合价格、技术指标和可用财务数据，给出结构化研究报告。
+
+### Case 3：A 股研究
+
+Ticker：600519
+
+问题：分析贵州茅台的近期行情及技术表现。
+
+### Case 4：真实数据缺失或失败
+
+使用受控方式模拟 Provider 不可用，或者记录实际遇到的真实失败。
+
+要求验证 Agent 是否安全降级，而不是编造数据。
+
+以上只是目标案例。若实际环境无法访问某个 Provider，必须报告 blocked / failed，不得用 Mock 结果替代并宣称真实验证通过。
+
+## 六、执行安全与成本控制
+
+真实 LLM 和真实金融 API 可能产生费用或触发限流。
+
+要求：
+
+1. 默认只执行离线测试。
+2. 真实 Smoke Test 必须由明确的 CLI 参数启用。
+3. 不在 pytest 中自动发起真实请求。
+4. 不在安装或导入模块时自动调用外部服务。
+5. 为真实执行设置 timeout、deadline 和迭代上限。
+6. 避免无限重试。
+7. 输出中记录模型名称、Provider 类型和运行状态。
+8. 不记录 API Key 或敏感环境变量。
+9. 在发起可能计费的真实 LLM 请求前，先列出将运行的案例、模型、调用上限和预估成本或无法估算的原因，并请求用户确认。
+10. 若缺少凭据或网络权限，不要绕过限制，完成离线验证并将真实案例标记为 blocked。
+
+不要将模型能够返回文本等同于完整 Agent 验证通过。
+
+## 七、真实运行结果
+
+为每个案例保存结构化结果。
+
+至少记录：
+
+- Case ID
+- Ticker
+- User Query
+- LLM Provider / Model
+- Financial Provider
+- Actual Tool Calls
+- Execution Status
+- Execution Time
+- Source Availability
+- Grounding Result
+- Errors / Warnings
+- Final Report Path
+- Outcome：pass / fail / blocked
+
+真实测试的 pass 必须同时满足：
+
+1. 真实 LLM 确实参与了 ReAct 决策。
+2. 至少执行了任务所需的真实金融工具。
+3. 获得可验证来源的数据。
+4. 最终报告与有效 observations 一致。
+5. 没有错误 ticker 数据或虚构数字。
+6. 最终执行状态符合预期。
+
+不得仅凭最终报告文件存在就判定成功。
+
+## 八、发现问题后的处理原则
+
+允许修复阻碍真实执行的最小必要问题，例如：
+
+- LLM 配置读取错误
+- Provider 初始化失败
+- 工具参数兼容问题
+- 实际返回字段的标准化问题
+- Trace 或状态记录缺陷
+- 真实执行入口不可用
+
+但必须：
+
+1. 先提供可复现证据。
+2. 添加离线回归测试。
+3. 保持现有安全边界。
+4. 不修改金融公式或估值语义。
+5. 不重构整个 Agent。
+6. 不降低 P2 评估标准。
+7. 不扩大到 Web 新功能。
+
+如果问题需要大规模重构，停止并报告，不要擅自扩大范围。
+
+## 九、测试要求
+
+增加必要的离线测试，覆盖：
+
+- 真实配置的读取与校验
+- 缺少凭据时的明确错误
+- 禁止静默 Mock 回退
+- Smoke Test 的显式启用机制
+- Provider 数据缺失
+- Provider 返回异常
+- 错误 ticker 拒绝
+- Deadline 与状态语义
+- 真实运行结果的序列化
+- 输出目录与敏感信息保护
+
+运行：
+
+- P2-A Benchmark
+- P2-B Reliability Evaluation
+- P3 定向测试
+- 完整 pytest
+- compileall
+- git diff --check
+
+真实请求与离线 pytest 严格分离。
+
+## 十、文档同步
+
+同步更新：
+
+- README.md
+- README.zh-CN.md
+- docs/engineering-notes.md
+- docs/engineering-notes.zh-CN.md
+
+README 简洁说明：
+
+- 如何配置真实 LLM
+- 如何选择真实 Provider
+- 如何显式运行 Smoke Test
+- 已验证和未验证的能力
+- 常见失败原因
+
+Engineering Notes 详细记录：
+
+- Real-World Execution Architecture
+- Configuration
+- Smoke Test Methodology
+- Case Results
+- Provider Limitations
+- Known Issues
+
+不要夸大实际验证结果。
+
+## 十一、Codex 日志
+
+向 docs/codex-log.md 追加：
+
+- P3 阶段和日期
+- 本次完整原始 Prompt
+- 审计结果
+- 关键实现决策
+- 修改文件
+- 实际执行命令
+- 真实 Smoke Test 结果
+- 完整 pytest 结果
+- 已知限制
+
+保留历史记录，不覆盖旧内容。
+
+不得写入密钥、Token 或真实 .env 内容。
+
+## 十二、范围限制
+
+本轮禁止：
+
+- 开发新的金融工具
+- 修改估值公式
+- 重构整个 LangGraph
+- 重写报告生成系统
+- 修改 P2 评分标准
+- 增加 LLM-as-Judge
+- 开发 Web 新功能
+- 自动交易或下单
+- 进入 P4
+- Commit / Push
+
+## 十三、最终汇报
+
+请用中文说明：
+
+1. 真实 LLM 与 Provider 的现有支持情况。
+2. 实际新增或修改了什么。
+3. 每个 Smoke Test 的结果。
+4. 哪些案例确实使用了真实 LLM 和真实 Provider。
+5. 哪些案例因网络、凭据或权限问题被阻塞。
+6. 发现并修复的真实问题。
+7. 完整 pytest 结果。
+8. P2 评估是否回归。
+9. 已知限制和 P4 前必须解决的问题。
+
+完成后停止，等待验收。
+
+不要 Commit / Push。
+```
+
+### 审计、任务理解与技术决策（摘要）
+
+- 实际仓库路径与会话声明的可写路径不一致。先在系统临时目录复制 Git 已跟踪文件
+  准备补丁，使用现有项目虚拟环境测试，不读取真实 .env、复制用户数据或改动原工作区。
+  临时副本随后初始化了独立 Git 元数据以运行 check-ignore 测试，没有 Commit。
+  应用补丁到原仓库需要文件系统权限确认。
+- 现有真实 LLM factory、工具注册表和 ReAct 入口可复用；OpenAI-compatible Base URL
+  由同一现有 client 支持，没有第二套 client。旧 research 示例缺 key 时使用脚本模型，
+  默认数据为 Mock，不能用于严格真实验收。
+- 新入口默认只预检，只有 --execute-real 允许真实请求。显式金融 Provider，
+  缺凭据/包/不支持市场即 blocked，无 Mock 回退；逐案例独立内存 checkpoint 和 trace，
+  关闭外部 LangSmith 遥测，不落盘原始 LLM 文本或 State。
+- 每案例默认 LLM 最多 4 次、每次最多 1,024 输出 token；LLM/工具/运行预算
+  20/15/60 秒；SDK 与工具重试均 0。不能据此推算金额上限，端点费率、输入 token、
+  工具 fan-out 未知。没有发出任何计费请求，因此没有请求费用授权。
+- pass 必须有研究模型响应、所需真实工具的有效来源/数值/timestamp、ticker 一致、
+  既有 grounding 检查和 finished 状态；纯文本或报告存在不算成功。
+  完整 observation、执行错误、来源期间和输出检查均保留。所有 P2 评分规则保持不变。
+- 第四案例只受控阻断利润表，保留真实价格链路；成功还需确实观测到错误及 unavailable
+  财务部分。它不是实际外部服务宕机的证据。
+- 当前 AkShare 代码使用美股接口，裸 600519 不受支持；明确 blocked，不猜测市场映射、
+  不增加 A 股适配器。年度/TTM/unknown/mixed-period 与 DCF 语义未变。
+- 真实 yfinance 解析的离线证据：fast_info 的 NaN 直接返回 NaN；
+  regularMarketPrice=0、currentPrice=123 返回 123。修复复用 _as_float，
+  选首个有限非缺失价格、保留 0；历史 OHLC 非有限/缺失时明确拒绝，不填零。
+- 输出独立目录、严格 JSON 与秘密脱敏；默认 smoke-results/ 忽略，拒绝受保护目录、
+  用户符号链接与路径穿越。实际运行暴露 /tmp 为 macOS 系统符号链接，已允许标准
+  /tmp -> /private/tmp 与 /var -> /private/var，保留其他符号链接拒绝。
+
+### 实际修改 / 新增文件
+
+- `app/tools/providers.py`：仅 yfinance 报价与历史 OHLC 有限值解析。
+- `app/evaluation/real_smoke.py`：显式配置、预检、真实路径 runner、安全判定、结构化产物。
+- `examples/real_smoke.py`：命令行入口、预算计划、明确退出码。
+- `tests/test_real_smoke.py`：49 项离线回归测试，不调用真实服务。
+- `.gitignore`：新增 smoke-results/。
+- `README.md`、`README.zh-CN.md`：配置、显式执行、实际阻塞及主要限制。
+- `docs/engineering-notes.md`、`docs/engineering-notes.zh-CN.md`：架构、方法、结果与风险。
+- `docs/codex-log.md`：本条追加记录，保留所有历史字节。
+
+没有改动 Workflow、State/Checkpoint 契约、真实 .env、金融公式、报告 Schema、
+P2 Dataset/评分标准、Web 或依赖配置。
+
+### 实际测试和执行记录
+
+以下首次验证在临时副本执行，解释器为原项目 `.venv/bin/python` 的绝对路径；
+命令中的 `<project-python>` 是该路径的可读缩写，不代表另建了 Python 环境。
+
+- `<project-python> -m pytest tests/test_real_smoke.py -v`：最终 **49 passed**（2.11 s）。
+- 首轮完整测试（当时 311 项）：310 passed / 1 failed，原有 Git ignore 检查因临时目录
+  最初没有 .git 失败；补齐临时 Git 元数据，不改原测试。
+- 加入最终测试后的两次完整测试：均 311 passed / 1 failed，
+  `test_repeatability_and_json_with_hostile_environment` 的可靠性汇总出现不一致。
+  独立复测该测试为 1 passed（1.20 s）。未修改该测试、故障预算或评分。
+- 为捕获失败的实际案例，在仓库外加入仅打印失败局部变量的临时 pytest diagnostic hook，
+  执行 `PYTHONPATH=/tmp <project-python> -m pytest -p stockmind_p3_diagnostics -v`：
+  **312 passed / 0 failed / 0 skipped，18.69 s**。该 hook 没有改测试或断言，未加入项目。
+  50 ms 模拟操作预算可能受调度影响；未确认根因，不将其隐藏为从未失败。
+- `<project-python> examples/evaluate.py --suite benchmark --output-dir /tmp/stockmind-p3-benchmark`：
+  completed_with_unsupported；P2-A 12/12 completed / grounded，macro P/R/F1 1.0；
+  P2-B 11 pass / 0 fail / 1 unsupported，Safe Termination 10/10，
+  Recovery 7/8（含 1 个 unsupported 分母），Safety Violations 0。
+  产物为该目录 evaluation-results.json 和 evaluation-report.md。
+- `<project-python> examples/real_smoke.py --output-dir /tmp/stockmind-p3-smoke`：
+  初次因 /tmp 系统别名被拒绝，修复后退出码 2，四个案例均 blocked；
+  产物在 run-20261118T063637Z-6c82beff/，包含四个 *-result.json。
+- `<project-python> -m compileall -q app tests examples`：退出码 0。
+- 原仓库应用补丁、原仓库完整测试与最终 git diff --check：见本条末尾最终验收记录。
+
+### 真实 Smoke Test 结果
+
+| Case ID | Ticker / Provider | Outcome | 原因 |
+| --- | --- | --- | --- |
+| aapl-price | AAPL / yfinance | blocked | 未显式启用；进程缺 OPENAI_API_KEY；缺 yfinance |
+| msft-research | MSFT / yfinance | blocked | 同上 |
+| a-share | 600519 / akshare | blocked | 未显式启用；缺 key/akshare；现有适配器仅用美股端点 |
+| provider-failure | AAPL / yfinance，受控利润表失败 | blocked | 未显式启用；缺 key/yfinance |
+
+没有真实 LLM 响应，没有真实金融 API 调用，没有实际运行受控故障案例。
+本地无 .env 文件，未读取敏感内容；没有测试网络可达性，不能声称网络成功或失败。
+阻塞案例没有 final report，路径记录为 null。离线 stub 通过不计作真实 pass。
+
+### 未解决的问题及后续建议
+
+- P3 真实验证尚未通过。需用户在本地配置凭据、安装可选包，在列明模型、案例、调用
+  上限及无法估算金额的原因后确认真实请求，才可进一步验证美股链路。
+- A 股适配器尚不支持；本轮保持 blocked，不扩展产品范围。
+- 同步 Provider 线程在取消后可能继续等待，asyncio deadline 不是整个进程的硬截止。
+- 真实网络限流、发布/行情时间、API 返回字段、真实工具调用兼容性和费用均未验证。
+  Grounding 与生产 assembler 共用 oracle，不是独立金融事实核验。
+- 既有可靠性重复性测试出现两次全套运行差异；保留失败事实，未调低标准。
+- 默认输出目录忽略；自定义目录应放仓库外或单独忽略；秘密脱敏不能替代
+  “不将秘密放入用户研究问题”的使用约束。
+
+### Git Commit 信息
+
+未 Commit / Push；没有新增提交。起始提交为用户已提交的 c6ed3f1。
+
+### 原工作区最终验收（补丁授权后）
+
+文件系统授权后，通过 `git apply --whitespace=error /tmp/stockmind-p3.patch`
+应用上述 10 个文件的补丁，没有 Commit/Push。原工作区继续使用已有 .venv，
+没有安装依赖。为遵守会话写入范围，pytest 禁用 bytecode/cache，
+compileall 将字节码写入系统临时目录，未修改测试断言或收集范围。
+
+实际执行：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -v -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/test_real_smoke.py -v -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python examples/evaluate.py --suite benchmark --output-dir /tmp/stockmind-p3-benchmark
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python examples/real_smoke.py --output-dir /tmp/stockmind-p3-smoke
+PYTHONPYCACHEPREFIX=/tmp/stockmind-p3-pycache .venv/bin/python -m compileall -q app tests examples
+git diff --check
+```
+
+- 完整 pytest：**312 passed / 0 failed / 0 skipped，18.80 s**，未使用 diagnostic hook。
+- P3 定向：**49 passed / 0 failed / 0 skipped，1.65 s**。
+- P2 Benchmark：completed_with_unsupported。P2-A 12/12 completed/grounded，
+  P/R/F1 均 1.0，25 次工具尝试、3 个预期 State error；
+  P2-B 11 pass / 0 fail / 1 unsupported，Safe Termination 10/10=100%，
+  Recovery 7/8=87.5%，Safety Violation Count=0。
+  原有 END timeout checkpoint replay 保持 unsupported。
+- 原工作区 Smoke 预检：退出 2，4 blocked；最终产物位于
+  `/tmp/stockmind-p3-smoke/run-20261118T064430Z-252caf7e/`。
+  分别为 aapl-price-result.json、msft-research-result.json、
+  a-share-result.json、provider-failure-result.json，没有真实最终报告。
+- compileall：退出 0；git diff --check：退出 0。
+  另对三个新增 Python 文件使用 git diff --no-index --check 检查，均无空白错误。
+- 验证默认 smoke-results/ 与 benchmark-results/ 被 Git 忽略，产物未跟踪。
+- 核对双语文档的相对链接路径均存在，原日志 102,599 字节完整保留。
+- Git diff 确认 Workflow、Agent、Model factory、State/Checkpoint、报告 Schema/assembler、
+  财务/估值/技术公式、P2 Dataset/评分、Web、依赖配置及真实 .env 均未修改。
+  Provider 唯一变更为本轮复现的 yfinance 报价与 OHLC 有限值处理。
+- 真实 LLM/金融 API 调用仍为 0；没有运行 --execute-real、没有请求费用授权、
+  没有以离线结果替代真实验证。P3 真实验收仍阻塞，未进入 P4。

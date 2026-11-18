@@ -9,6 +9,7 @@ trace_logs/
 checkpoints/
 charts/
 benchmark-results/
+smoke-results/
 *.sqlite
 *.db
 *.egg-info/

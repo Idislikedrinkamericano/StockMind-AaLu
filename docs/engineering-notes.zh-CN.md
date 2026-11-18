@@ -4,6 +4,121 @@
 
 本页保留面向贡献者的实现细节，避免项目主页变成开发记录。
 
+## 真实执行验证（P3）
+
+### 审计与执行架构
+
+现有 `get_chat_model` 选择 ChatOpenAI 或 ChatAnthropic，通过原生工具绑定驱动
+既有 ReAct graph；显式真实 Provider 已能绑定同一工具注册表。本轮未引入第二套
+Client、新金融工具、报告 Schema、公式、Graph 路由或 P2 评分规则。
+
+旧 `research.py` 加载本地 dotenv，在两种 API Key 都缺失时切换脚本模型，数据
+默认为 Mock；异步示例和 Web 也是脚本演示，不是严格的真实验证入口。
+`examples/real_smoke.py` 显式选择模型与 Provider，每案例使用独立内存 checkpoint
+和仅驻内存的 TraceCollector，关闭 LangSmith 遥测，不加载 dotenv 或回退 Mock。
+
+生产执行上限、ticker 拒绝、去重和安全 Finalize 保持不变。Finalize 仅使用确定性
+assembler；未恢复 LLM 异常保留 `error`，超时保留 `timeout`，已处理 Provider
+失败可以返回 `finished` 部分报告。错误与成功 observations 分开记录。
+END timeout checkpoint 的重读仍不能重新启动研究。
+
+### 配置与显式执行
+
+环境变量：`STOCKMIND_LLM_PROVIDER=openai|anthropic`、`STOCKMIND_LLM_MODEL`，
+以及所选 Provider 的 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。
+未指定模型时沿用现有默认值（`gpt-4o-mini` 或 `claude-3-5-haiku-latest`），
+没有验证账户是否能使用这些模型。OpenAI-compatible 端点使用
+`OPENAI_API_BASE` 或 `OPENAI_BASE_URL`（前者优先）；Anthropic 可使用
+`ANTHROPIC_BASE_URL`。URL 必须为 HTTP(S)，不得嵌入用户名密码、查询参数或 fragment。
+变量由操作者导出；Smoke 入口不读取或修改真实 `.env`。
+
+```bash
+python examples/real_smoke.py --case aapl-price
+python examples/real_smoke.py --case aapl-price --execute-real
+python examples/real_smoke.py --ticker MSFT --query "Research price and trends" \
+  --provider yfinance --deadline 60 --max-iterations 4 --output-dir smoke-results
+```
+
+第一、第三条仅预检。任何真实执行均需 `--execute-real`，使用前应确认案例、模型及费用。
+CLI 在构造客户端前打印计划。默认每案例最多 4 次 LLM 调用，每次最多 1,024 输出 token，
+LLM / Tool / Run 预算为 20 / 15 / 60 秒，SDK 和工具重试均为 0。
+工具并发请求数和输入 token 总量没有严格上限，因此上述限制不是金额上限；
+费率依赖所选端点，本轮不提供美元估算，也不声称零费用。
+
+缺少凭据/依赖和不支持的裸 A 股代码会返回 `blocked`，不构造客户端。
+运行时网络/认证等失败返回 `fail`，保留实际错误和状态。产物不保存凭据或 Base URL；
+异常文本中的已知密钥、授权/token 模式和 URL 会被脱敏。用户仍不应在问题中放入秘密。
+
+### 方法与结果契约
+
+每案例记录 ID、ticker/问题、LLM Provider/模型、金融 Provider、执行限制、
+注入标签、实际 trace 工具调用、来源可用性/期间、grounding 检查、状态、
+耗时、错误/警告、outcome 及可选报告路径，保留成功 observations 供检查。
+每次创建 `run-<UTC>-<随机后缀>/` 防止覆盖旧产物，拒绝受保护路径与用户符号链接，
+允许 macOS 标准临时目录别名。默认 `smoke-results/` 已被 Git 忽略；
+其他自定义目录需要自行忽略，或放在仓库外。
+
+pass 同时要求：研究阶段收到 LLM 响应、正常终止、所需工具确实执行并取得有限且
+可用的数据、认可的真实 Provider 来源和时间戳、ticker 一致，以及原 P2 grounding
+一致性检查通过。所需工具类别基于成功 observations，不只是尝试调用。
+只有报告文件或纯文本响应不能通过。错误 ticker、Mock、只有元数据或缺失值的
+payload 不能满足来源覆盖；这不等于独立验证数据源真值或估值正确性。
+
+| 案例 | 必需证据 / 行为 | 当前真实结果 |
+| --- | --- | --- |
+| AAPL 价格 | 价格 + 历史行情 | blocked |
+| MSFT 综合 | 价格 + 历史 + 技术工具 + 财务工具 | blocked |
+| 600519 A 股 | 价格 + 历史 + 技术工具 | blocked；适配器不支持 |
+| AAPL Provider 失败 | 真实价格；受控利润表异常；财务部分 unavailable | blocked |
+
+第四个案例仅包装 `get_income_statement` 抛出受控异常，其他请求仍走所选真实
+Provider；必须实际获得价格、观察到注入错误并正确披露财务缺失才能通过。
+这是局部故障实验，不能声称外部 Provider 真的宕机。自定义案例无论额外研究要求为何，
+均要求价格和历史行情。
+
+### 本轮结果与最小数据修复
+
+2026-11-17（America/Los_Angeles）预检：进程没有支持的 LLM 凭据，本地没有 dotenv
+文件，两个可选 Provider 包均未安装。四个案例全部 **blocked，真实 LLM 和金融 API
+调用均为 0**，未测试网络可达性。现有 AkShare 实现使用美股
+Sina/Eastmoney/Baidu 端点，仅安装 AkShare 不能验证 `600519`；本轮没有新增 A 股适配器。
+
+离线复现确认：yfinance `fast_info.last_price=NaN` 会作为价格返回；
+回退 `regularMarketPrice=0` 则因布尔 `or` 被 `currentPrice=123` 替代。
+最小修改复用 `_as_float`，选择首个有限且非缺失的报价并保留零值，无可用报价则抛出异常。
+历史 OHLC 缺失/非有限时拒绝该序列，不填零或静默插值。财务字段映射、
+期间元数据、金融公式及 DCF 语义不变。
+
+新增离线测试覆盖配置、缺少凭据/依赖、显式开关、两种既有 Client factory、
+安全/非法 Base URL、使用 stub Client/HTTP 边界的实际 Graph 路径、缺失数据、
+Provider/LLM 异常、ticker 不一致、来源检查、deadline/取消、受控部分失败、
+严格 JSON、脱敏和安全输出路径。
+
+P2 重跑：基线 completed 与 grounded 均 12/12，macro tool P/R/F1 为 1.0；
+可靠性 11 pass / 0 fail / 1 unsupported，安全终止 10/10，恢复 7/8
+（分母包含符合条件的 unsupported 案例），安全违规 0。以上仍是离线脚本结果。
+实际命令、测试数量和中间失败记录见本轮 Codex 日志，没有降低 P2 阈值。
+
+原工作区最终验收：**P3 定向 49 passed**（1.65 s），**完整 312 passed、
+0 failed、0 skipped**（18.80 s）。app/tests/examples 的 compileall 与
+git diff --check 均通过。实际仓库不在会话默认可写路径内，因此测试禁用字节码与缓存写入，
+compileall 字节码写入临时目录。没有安装依赖；此前间歇性失败仍保留在下方及日志中。
+
+### 扩大使用前的剩余限制
+
+- 真实模型工具调用兼容性、凭据、行情新鲜度及网络可用性仍未验证；需操作者确认
+  凭据与费用、安装可选依赖后再做真实验证。
+- 当前 AkShare 不支持要求的 A 股案例。美股报价时间戳可能只是取回时间；
+  财务期间和发布日期仍可能 unknown/mixed，现有数据仍不足以确认严格 DCF 现金流口径。
+- 同步金融 Provider 在线程中运行；asyncio 超时阻止新的工作流调用，但不能强制停止
+  已开始的同步请求，进程退出可能等待该线程。本轮不承诺硬性墙钟时限，
+  Provider/网络取消需要进一步验证。
+- Grounding 与生产 assembler 共用 oracle；长工具 payload、提示注入抵抗能力、
+  真实费用/性能尚未评估。
+- 两次完整测试出现 P2 重复性结果不一致，单独重跑通过。50 ms 故障注入预算可能受
+  调度影响，但尚未确认根因。本轮未调整可靠性断言或预算。
+
+
 ## 工作流与报告
 
 `StockMindAgent` 运行由 `agent`、`tools` 和 `finalize` 节点组成的异步 LangGraph

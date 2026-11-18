@@ -5,6 +5,148 @@
 This page keeps contributor-oriented implementation details out of the project
 home page.
 
+## Real-World Validation (P3)
+
+### Audit and execution architecture
+
+The existing `get_chat_model` factory selects ChatOpenAI or ChatAnthropic; native
+tool binding drives the existing ReAct graph. Explicit real providers already
+bind to the same tool registry. No second client, new financial tool, report
+schema, formula, graph transition or P2 scoring rule is introduced.
+
+The legacy `research.py` loads local dotenv and selects a scripted model when
+neither supported API key is present. Its data default is Mock. The async
+example and Web are scripted demonstrations. These are not strict live-validation
+entries. `examples/real_smoke.py` instead uses explicit model/provider arguments,
+fresh in-memory checkpoint state and a memory-only TraceCollector. It disables
+LangSmith telemetry and never loads dotenv or falls back to Mock.
+
+Production limits, ticker rejection, duplicate handling and safe Finalize remain
+unchanged. Finalize uses only the deterministic assembler; unrecovered LLM errors
+retain `error`, timeouts retain `timeout`, and handled provider failures can
+produce a `finished` partial report. Errors are separate from successful
+observations. END timeout checkpoint replay still cannot restart research.
+
+### Configuration and explicit execution
+
+Environment: `STOCKMIND_LLM_PROVIDER=openai|anthropic`, `STOCKMIND_LLM_MODEL`,
+and the selected provider's `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`.
+Omitted model names use the existing factory defaults (`gpt-4o-mini` or
+`claude-3-5-haiku-latest`); account availability is not verified.
+OpenAI-compatible endpoints use `OPENAI_API_BASE` or `OPENAI_BASE_URL` (first wins);
+Anthropic supports `ANTHROPIC_BASE_URL`. URLs must be HTTP(S) without embedded
+credentials, query or fragment. These variables must be exported by the operator;
+the smoke entry does not read or modify the real `.env`.
+
+```bash
+python examples/real_smoke.py --case aapl-price
+python examples/real_smoke.py --case aapl-price --execute-real
+python examples/real_smoke.py --ticker MSFT --query "Research price and trends" \
+  --provider yfinance --deadline 60 --max-iterations 4 --output-dir smoke-results
+```
+
+The first and third commands are preflight only. Every live invocation requires
+`--execute-real`; review cases, model and charges before using it. The CLI prints
+the plan before constructing clients. Defaults are 4 LLM calls/case, 1,024 maximum
+output tokens/call, 20 s LLM / 15 s tool / 60 s run budgets. SDK and tool retries
+are zero. Tool fan-out and input-token volume are not strictly capped, so these
+limits do not establish a monetary cost ceiling. Tariffs depend on the selected
+endpoint; no dollar estimate or zero-cost claim is made.
+
+Missing keys/packages and unsupported bare A-share tickers return `blocked`
+without client construction. Runtime/network/authentication failures return
+`fail`, retaining actual error/status information. No credentials or base URL
+are written to artifacts; known keys, authorization/token patterns and URLs in
+exception strings are redacted. User queries should still contain no secrets.
+
+### Methodology and result contract
+
+Each case stores ID, ticker/query, LLM provider/model, financial provider,
+limits, injection label, actual traced tool calls, source availability/periods,
+grounding checks, status, elapsed time, errors/warnings, outcome and optional
+report path. Successful observations are retained for review. A new
+`run-<UTC>-<random>/` directory prevents overwriting earlier artifacts. Protected
+paths and user symlinks are rejected; macOS standard temporary aliases work.
+Default `smoke-results/` is ignored by Git; custom directories outside this path
+need their own ignore rule or should be outside the repository.
+
+A pass requires a research LLM response, normal terminal status, actual required
+tool executions with finite, available data and a recognized real-provider source
+and timestamp, matching tickers, and the unchanged P2 grounding-consistency
+check. Required categories are checked against successful observations, not just
+attempted calls. A report file or a text-only response never suffices. Wrong-ticker,
+Mock, metadata-only and missing-value payloads cannot satisfy source coverage.
+This is not independent verification of source truth or valuation correctness.
+
+| Case | Required evidence / behavior | Current live outcome |
+| --- | --- | --- |
+| AAPL price | Price + historical prices | blocked |
+| MSFT research | Price + history + a technical + a financial tool | blocked |
+| 600519 A-share | Price + history + a technical tool | blocked; adapter unsupported |
+| AAPL provider failure | Real price; controlled income-statement exception; unavailable financial section | blocked |
+
+The fourth case wraps only `get_income_statement` with a controlled exception;
+other requests use the selected real provider. Its pass requires an actual price,
+an observed injected error and safe missing-financial disclosure. It is a partial
+outage experiment, not evidence that the external provider was down. Custom
+cases require price and history regardless of extra requested analysis.
+
+### Results and minimal data fix
+
+On 2026-11-17 (America/Los_Angeles), preflight found no supported LLM credential
+in the process, no local dotenv file and neither optional provider package.
+All four cases are **blocked; zero real LLM or financial API calls were made**.
+Network reachability was not tested. The existing AkShare implementation uses
+US Sina/Eastmoney/Baidu endpoints, so installing AkShare alone cannot validate
+`600519`; no A-share adapter was added.
+
+Offline reproduction found that yfinance `fast_info.last_price=NaN` passed through
+as a price, while fallback `regularMarketPrice=0` was replaced by
+`currentPrice=123` because of boolean `or`. The minimal provider change reuses
+`_as_float`, chooses the first finite nonmissing quote (preserving zero), and
+raises when none exists. Historical OHLC containing missing/nonfinite values is
+rejected, not zero-filled or silently interpolated. Financial mappings, period
+metadata, formulas and DCF semantics are unchanged.
+
+The new offline tests cover configuration, missing credentials/dependencies,
+explicit gating, both existing client factories, safe and unsafe base URLs,
+actual graph execution against stubbed client/HTTP boundaries, missing data,
+provider/LLM errors, ticker mismatches, source checks, deadlines/cancellation,
+controlled partial failure, strict JSON, redaction and safe output paths.
+
+P2 rerun: baseline 12/12 completed and grounded, macro tool P/R/F1 1.0;
+reliability 11 pass / 0 fail / 1 unsupported, safe termination 10/10,
+recovery 7/8 (including the unsupported eligible case), safety violations 0.
+These remain offline scripted results. See the P3 Codex log for exact commands,
+test counts and intermediate failures; no P2 threshold was weakened.
+
+Final verification in the original workspace: **49 P3 tests passed** (1.65 s),
+**312 full-suite tests passed, 0 failed, 0 skipped** (18.80 s).
+Compileall for app/tests/examples and git diff --check passed. Test bytecode/cache
+writes were disabled; compileall bytecode was redirected to a temporary directory
+because the actual workspace lies outside the session's default writable roots.
+No dependency was installed. The earlier intermittent failures remain recorded below.
+
+### Remaining limits before broader use
+
+- Live model tool compatibility, credentials, market freshness and network
+  availability remain unverified; these must be tested with operator-approved
+  credentials, costs and installed optional dependencies.
+- AkShare here does not support the requested A-share case. US quote timestamps
+  may reflect retrieval time rather than exchange time. Financial periods and
+  publication dates can remain unknown/mixed; current data still cannot justify
+  a strict DCF cash-flow basis.
+- Sync financial providers run in worker threads. An asyncio timeout stops new
+  workflow work but cannot forcibly stop an already running synchronous request;
+  process shutdown can wait for that thread. No hard wall-clock guarantee is
+  claimed. Provider/network cancellation needs further validation.
+- Grounding shares the production assembler oracle. Long tool payloads, prompt
+  injection resilience and real-world cost/performance have not been evaluated.
+- Two full runs observed a P2 repeatability mismatch; its isolated rerun passed.
+  The 50 ms injected-operation budgets are a possible scheduling sensitivity,
+  not a confirmed root cause. No reliability assertion or budget was changed.
+
+
 ## Workflow and Reporting
 
 `StockMindAgent` runs an async LangGraph workflow with `agent`, `tools`, and

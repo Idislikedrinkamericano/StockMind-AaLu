@@ -129,6 +129,38 @@ When an OpenAI or Anthropic API key is available, `research.py` creates
 within the workflow's iteration and time limits. Data remains mock unless
 `STOCKMIND_DATA_PROVIDER` is changed.
 
+### Explicit Real-World Smoke Test
+
+Install the `real-data` extra above, then securely export the selected provider's
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in your shell. This entry **does not load
+`.env`** or fall back to Mock/Scripted Demo. Select `STOCKMIND_LLM_PROVIDER`
+(`openai` / `anthropic`) and `STOCKMIND_LLM_MODEL`; OpenAI-compatible services
+can use `OPENAI_BASE_URL` (or `OPENAI_API_BASE`, which takes precedence).
+
+```bash
+# Offline preflight only; writes blocked records, makes no requests.
+python examples/real_smoke.py --case aapl-price
+# After reviewing the plan and potential charges, explicitly enable real requests:
+python examples/real_smoke.py --case aapl-price --execute-real
+# Custom case (requires sourced price and history):
+python examples/real_smoke.py --ticker MSFT --query "Research price and trends" \
+  --provider yfinance --deadline 60 --output-dir smoke-results
+```
+
+Omit `--case` for all four target cases; custom runs also require `--execute-real`
+to make requests. Defaults: at most 4 LLM calls per case, 1,024 output tokens per
+call, 20 s LLM / 15 s tool / 60 s run limits, no SDK or tool retries.
+Token limits are not a monetary cap. Results and safe reports are saved under
+`smoke-results/run-*/` (Git-ignored). Exit codes: 0 all pass, 1 any fail,
+2 blocked with no failures. A report alone is insufficient to pass.
+
+**Live verification is pending:** all four current target cases are blocked
+(missing credentials and optional provider packages). Existing AkShare code uses
+US endpoints; bare A-share `600519` is explicitly unsupported here. Authentication,
+network/rate limits, unavailable fields and incompatible tool-calling endpoints
+may also prevent completion. See [P3 methodology and limitations](docs/engineering-notes.md#real-world-validation-p3).
+
+
 ### Async Checkpoint Demo
 
 ```bash

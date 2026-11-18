@@ -467,17 +467,15 @@ class YFinanceMarketDataProvider(MarketDataProvider):
         # fast_info hits a single, lighter endpoint and is usually more reliable.
         try:
             fast = t.fast_info
-            price = fast.last_price
+            price = _as_float(fast.last_price)
             currency = fast.currency or "USD"
         except Exception:
             price = None
         if price is None:
             info = t.info or {}
-            price = (
-                info.get("regularMarketPrice")
-                or info.get("currentPrice")
-                or info.get("previousClose")
-            )
+            # Missing/non-finite quotes are not prices; a genuine zero is.
+            price = next((value for key in ("regularMarketPrice", "currentPrice", "previousClose")
+                          if (value := _as_float(info.get(key))) is not None), None)
             currency = info.get("currency", "USD")
         if price is None:
             raise ValueError(f"No price found for ticker {symbol!r}")
@@ -497,17 +495,19 @@ class YFinanceMarketDataProvider(MarketDataProvider):
         df = self._yf().Ticker(symbol).history(period=period, interval=interval, auto_adjust=True)
         if df is None or df.empty:
             raise ValueError(f"No historical data found for ticker {symbol!r}")
-        bars = [
-            PriceBar(
+        bars = []
+        for index, row in df.iterrows():
+            values = [_as_float(row.get(key)) for key in ("Open", "High", "Low", "Close")]
+            if any(value is None for value in values):
+                raise ValueError(f"Invalid historical OHLC data for ticker {symbol!r}")
+            bars.append(PriceBar(
                 date=str(index.date()),
-                open=float(row["Open"]),
-                high=float(row["High"]),
-                low=float(row["Low"]),
-                close=float(row["Close"]),
+                open=values[0],
+                high=values[1],
+                low=values[2],
+                close=values[3],
                 volume=int(row["Volume"]),
-            )
-            for index, row in df.iterrows()
-        ]
+            ))
         return HistoricalPricesResult(
             ticker=symbol,
             period=period,

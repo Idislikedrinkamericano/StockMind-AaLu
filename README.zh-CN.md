@@ -119,6 +119,36 @@ python examples/research.py --tickers AAPL --lang en
 `StockMindAgent`。模型可以在工作流的迭代和时间限制内请求已注册工具。除非更改
 `STOCKMIND_DATA_PROVIDER`，数据仍默认为 mock。
 
+### 显式真实 Smoke Test
+
+先安装前述 `real-data` 可选依赖，再通过安全方式将所选 Provider 的
+`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY` 导出到 shell 环境。此入口**不加载
+`.env`**，也不回退到 Mock 或 Scripted Demo。使用 `STOCKMIND_LLM_PROVIDER`
+（`openai` / `anthropic`）和 `STOCKMIND_LLM_MODEL` 选择模型；OpenAI-compatible
+服务可设置 `OPENAI_BASE_URL`（或优先级更高的 `OPENAI_API_BASE`）。
+
+```bash
+# 仅离线预检：保存 blocked 记录，不发出请求。
+python examples/real_smoke.py --case aapl-price
+# 确认计划及潜在费用后，显式启用真实请求：
+python examples/real_smoke.py --case aapl-price --execute-real
+# 自定义案例（要求有来源的价格与历史行情）：
+python examples/real_smoke.py --ticker MSFT --query "Research price and trends" \
+  --provider yfinance --deadline 60 --output-dir smoke-results
+```
+
+省略 `--case` 检查全部四个目标案例；自定义案例也需要 `--execute-real` 才会请求服务。
+默认每案例最多 4 次 LLM 调用，每次最多 1,024 输出 token；LLM / Tool / Run
+限制分别为 20 / 15 / 60 秒，SDK 和工具均不重试。Token 限制不是金额上限。
+结果和安全报告存入 Git 已忽略的 `smoke-results/run-*/`。
+退出码：全部 pass 为 0，存在 fail 为 1，无 fail 但存在 blocked 为 2；仅生成报告不算通过。
+
+**真实验证仍待完成：**当前四个目标案例均 blocked（缺少凭据及可选 Provider 包）。
+现有 AkShare 代码使用美股接口，本入口明确不支持裸 A 股代码 `600519`。
+认证、网络/限流、字段缺失及端点不兼容工具调用也可能阻止完成。
+详见 [P3 方法与限制](docs/engineering-notes.zh-CN.md#真实执行验证p3)。
+
+
 ### 异步 Checkpoint 演示
 
 ```bash
