@@ -8,6 +8,7 @@ __pycache__/
 trace_logs/
 checkpoints/
 charts/
+benchmark-results/
 *.sqlite
 *.db
 *.egg-info/

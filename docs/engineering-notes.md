@@ -609,6 +609,128 @@ cross-process/cancellation limitations still apply. Existing consumers that trea
 any report as success must inspect status; trace consumers may now see
 `tool_skipped`. No P2-C work or commit/push was performed.
 
+### Reproducible Offline Benchmark (P2-C)
+
+The preflight worktree was clean at `22a6d50`. The existing P2-A `EvaluationReport`
+and P2-B `ReliabilityReport` already serialize per-case reports, observations,
+traces, checks and aggregates. The existing CLI supported baseline/reliability
+JSON. P2-C adds orchestration and presentation, not a new scorer: `benchmark.py`
+runs the unchanged evaluators sequentially; `report_generator.py` renders the
+serialized result. Dataset, fixtures, fault injection, production Workflow,
+financial logic and report schema are unchanged. No dependency was added.
+
+```bash
+python examples/evaluate.py --suite benchmark --output-dir benchmark-results
+python -m app.evaluation.report_generator benchmark-results/evaluation-results.json --output benchmark-results/evaluation-report.md
+```
+
+The first command writes `evaluation-results.json` and `evaluation-report.md`.
+The second only reads saved JSON; it never runs the Agent. The default directory
+is `benchmark-results/`, ignored by Git. Custom output directories are supported;
+keep them outside version control or add an appropriate ignore rule. These files
+are generated locally, not a committed published report. Repeated runs replace
+these two artifact files. Existing baseline/reliability commands, JSON-to-stdout,
+`--dataset` and `--output` remain supported. Benchmark uses both bundled datasets
+and rejects ambiguous `--dataset`/`--output`; `--output-dir` is Benchmark-only.
+`--lang` changes underlying research-report language; the audit Markdown uses
+English headings and stable machine field names.
+
+Each existing runner constructs fresh models, fixtures, traces and in-memory
+checkpoints per case. Only checkpoint probes intentionally share a saver within
+one case. Explicit scripted/fake models and fixtures ignore live provider settings,
+no `.env` is loaded, and telemetry stays disabled. No financial/LLM API is called.
+Source metadata runs local `git rev-parse`/`git status` only, without reading
+remotes or credentials; outside a Git checkout it reports unavailable metadata.
+
+`stockmind-benchmark-v1` JSON contains:
+
+| Field | Meaning |
+| --- | --- |
+| `benchmark_version`, `started_at`, `generated_at`, `elapsed_seconds` | Version, UTC execution/generation times and measured orchestration duration |
+| `source_revision` | Git commit and dirty-worktree flag; not a claim the current uncommitted code equals HEAD |
+| `scope` | Two suites, actual combined case count, fake models, synthetic fixtures and checkpoint scope |
+| `baseline`, `reliability` | Complete existing suite JSON, including dataset/fixture hashes, runtime versions and raw per-case evidence |
+| `baseline_counts` | Counts of existing task_completed and grounded booleans for ratio display |
+| `baseline_error_accounting` | Dataset error expectations, observed State errors, recorded tool errors and existing failed-case IDs |
+| `metric_definitions` | Definitions, JSON source paths and denominators |
+| `historical_comparison` | Explicitly labelled historical transcription with source commit/path/section |
+| `status` | completed, completed_with_unsupported or completed_with_failures |
+
+Current score tables read these fields; no current score is hardcoded. All cases
+retain their IDs and terminal states in both outputs. Fail/unsupported cases
+include reasons, and failed cases include their actual error text. The Markdown
+omits long machine traces; JSON retains them. Rates/latencies are rounded for
+display, while JSON retains original precision. Rendering saved JSON again
+produces the same Markdown; rerunning the benchmark does not promise identical
+timings or timestamps.
+
+Metric semantics remain those of the existing evaluators:
+
+- P2-A task completion requires all completion rules, not just a report. Grounding
+  is consistency with the production assembler, not independent financial truth.
+  Tool scores are unweighted macro set P/R/F1 over every case, not autonomous
+  planning skill. No arbitrary weighted aggregate is introduced.
+- Actual tool errors count `actual_calls` entries with an error; State errors
+  include blocked requests too. Expected tool-error text matches declared dataset
+  patterns; matching does not itself prove case completion. Unexpected failure
+  IDs come from existing false completion/grounding or failure_reasons. In the
+  current baseline there are 3 expected/observed State errors but only 2 executed
+  tool error attempts: wrong ticker was rejected before execution.
+- Safe termination remains passing eligible cases / all eligible cases. Recovery
+  remains passing recovered cases / all declared recovery cases, including
+  unsupported. Numerators, denominators and unsupported counts are copied from
+  P2-B, not recalculated with a different inclusion policy. Zero denominator
+  remains null; safety findings retain their inspectable evidence.
+- `status` is completed_with_failures if either suite has existing unexpected
+  failures; otherwise completed_with_unsupported if applicable, else completed.
+  CLI exit 0 means artifacts were written, not that every case passed. CI must
+  inspect status and suite verdicts. Expected controlled failures are not newly
+  relabelled as unsuccessful reliability checks.
+
+Historical provenance: no historical raw evaluation JSON is tracked in the
+repository. Both the historical Before (9/2/1, safe termination 8/10, recovery 7/8,
+one violation) and historical After Fix (11/0/1, 10/10, 7/8, zero violations) are
+transcribed from `docs/codex-log.md`, section `2026-11-17 — P2-B Fix：Agent Reliability
+Hardening`, at commit `22a6d5039547a1d102f9e29ebd48c4f4c96b2292`. They describe
+same-batch duplicate execution and LLM-error status overwriting. Neither historical
+column is recomputed against today's Workflow. The current measured suite is
+reported separately, even if it regresses or disagrees with the historical After.
+No `/tmp` historical artifact is required for the new Benchmark to work.
+
+Actual validation (2026-11-17 America/Los_Angeles; report timestamps are UTC):
+
+- `.venv/bin/python examples/evaluate.py --suite benchmark --output-dir /tmp/stockmind-p2-c-benchmark`:
+  24 cases, status **completed_with_unsupported**. P2-A **12/12 completion and
+  grounding**, macro P/R/F1 **1.0**, 25 attempts, 3 expected State errors,
+  2 expected tool error attempts, 0 unexpected failures. P2-B **11 pass / 0 fail /
+  1 unsupported**, safe termination **10/10**, recovery **7/8**, safety violations
+  **0**. The final measured orchestration took 0.4523 s; not a benchmark claim
+  about other machines or real services.
+- `.venv/bin/python -m app.evaluation.report_generator /tmp/stockmind-p2-c-benchmark/evaluation-results.json --output /tmp/stockmind-p2-c-benchmark/evaluation-report-regenerated.md`:
+  Markdown byte-identical to the original report.
+- `.venv/bin/python -m pytest tests/test_benchmark.py tests/test_evaluation.py tests/test_reliability_evaluation.py -v`:
+  **93 passed** (5.01 s), including **17 new tests**.
+- `.venv/bin/python -m pytest -v`: **263 passed, 0 failed, 0 skipped** (final requested rerun: 17.69 s; initial full run: 18.25 s).
+  One warning concerns sandbox permissions for pytest cache writes.
+- `.venv/bin/python -m compileall -q app tests examples`: passed after permission
+  to write bytecode; the initial sandbox attempt failed with PermissionError.
+- `git diff --check`: passed. Outputs reside in `/tmp`, outside the repository.
+
+Tests also deliberately fail baseline and reliability case construction to verify
+that failed cases, actual errors and unsupported recovery remain in both files;
+they perturb report inputs to detect hardcoded scores, check denominator/source
+labels, repeat execution, block external connections/provider selection, check
+custom/default directories, regenerate without Agent calls and retain old CLI
+behavior. The first targeted run exposed missing concrete error text in Markdown
+(92 passed, 1 failed); the renderer was corrected, without changing scoring.
+
+This is not a real-LLM benchmark, live-market accuracy validation, independent
+financial fact check, complete real-Provider fault test or evidence of suitability
+for automatic trading/investment decisions. END timeout checkpoint recovery remains
+unsupported. Runtime load, short simulated deadlines, dependency versions and dirty
+worktrees limit reproduction; input hashes and package versions are recorded but
+not all dependency combinations are tested. No P3 or commit/push is included.
+
 ### Prompt journal
 
 `promptlog/` is a separate local prompt-recording utility:

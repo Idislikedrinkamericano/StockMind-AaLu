@@ -143,18 +143,20 @@ python app.py
 ### 离线评估
 
 ```bash
-python examples/evaluate.py --output /tmp/stockmind-evaluation.json
-python examples/evaluate.py --suite reliability --output /tmp/stockmind-reliability.json
+python examples/evaluate.py --suite benchmark --output-dir benchmark-results
 ```
 
-使用固定合成 fixtures 和脚本化 LLM 响应运行 12 个版本化案例，不随 API Key 或 Provider
-配置切换模式。JSON 包含工具集合 Precision / Recall / F1、规则化任务完成检查、报告与
-观测一致性及执行指标。这些是回归检查，不代表真实 LLM 性能或独立金融准确性验证。
-详见[指标定义与限制](docs/engineering-notes.zh-CN.md#评估与-prompt-记录)。
+使用脚本/Fake Model 和固定合成 fixtures，一次运行 12 个基线案例与 12 个可靠性案例。
+不加载 `.env`，不根据 API Key 选择真实服务。生成 `benchmark-results/evaluation-report.md`
+及同目录的 `evaluation-results.json`。它们是 **本地生成产物**，已由 Git 忽略，并非
+已提交的 GitHub 文档；可用 `--output-dir` 指定其他目录。
 
-可靠性套件新增 12 个离线故障注入案例，覆盖工具、LLM、部分证据和内存 checkpoint。
-JSON 分别保留失败与不支持的恢复结果，并明确安全终止率、恢复率的分母。这些脚本检查
-不衡量真实 LLM 可靠性。详见[可靠性结果与限制](docs/engineering-notes.zh-CN.md#可靠性评估)。
+已记录离线结果（2026-11-17）：基线完成与 grounding 均 **12/12**，脚本化 macro
+P/R/F1 **1.0**；可靠性 **11 pass / 0 fail / 1 unsupported**，安全终止 **10/10**，
+恢复 **7/8**，安全违规 **0**。这些是工作流与一致性检查，不代表真实 LLM 性能或
+独立金融准确性验证；历史对比明确引用开发记录。原单套件命令保留：省略 `--suite`
+运行基线，或使用 `--suite reliability`，均可选用 `--output results.json`。
+详见 [Benchmark 用法、指标定义与限制](docs/engineering-notes.zh-CN.md#可复现离线-benchmarkp2-c)。
 
 ## 技术栈
 

@@ -155,21 +155,23 @@ root; that file delegates to `.[web]`.
 ### Offline Evaluation
 
 ```bash
-python examples/evaluate.py --output /tmp/stockmind-evaluation.json
-python examples/evaluate.py --suite reliability --output /tmp/stockmind-reliability.json
+python examples/evaluate.py --suite benchmark --output-dir benchmark-results
 ```
 
-Runs 12 versioned cases with fixed synthetic fixtures and scripted LLM responses,
-regardless of API keys or provider settings. JSON includes tool-set Precision /
-Recall / F1, rule-based completion, report/observation consistency, and execution
-metrics. These are regression checks, not real-LLM performance or independent
-financial accuracy. See the [metric definitions and limits](docs/engineering-notes.md#evaluation-and-prompt-journal).
+Runs both versioned suites: 12 baseline cases and 12 reliability cases, with
+scripted/fake models and fixed synthetic fixtures. It does not load `.env` or
+select live services from API keys. Produces `benchmark-results/evaluation-report.md`
+and `evaluation-results.json` in the same directory. These are **local generated
+artifacts**, ignored by Git, not committed GitHub documents; `--output-dir` is configurable.
 
-The reliability suite adds 12 offline fault-injection cases for tools, LLMs,
-partial evidence, and in-memory checkpoints. JSON retains failures and unsupported
-recovery separately, with explicit safe-termination and recovery denominators.
-These scripted checks do not measure real-LLM reliability. See the
-[reliability results and limitations](docs/engineering-notes.md#reliability-evaluation).
+Recorded offline result (2026-11-17): baseline completion and grounding **12/12**,
+scripted macro P/R/F1 **1.0**; reliability **11 pass / 0 fail / 1 unsupported**,
+safe termination **10/10**, recovery **7/8**, safety violations **0**.
+These are workflow and consistency checks, not real-LLM performance or independent
+financial accuracy. Historical comparisons are explicitly sourced from development
+records. Single-suite commands remain supported: omit `--suite` for baseline or
+use `--suite reliability`, with optional `--output results.json`. See
+[Benchmark usage, metric definitions and limits](docs/engineering-notes.md#reproducible-offline-benchmark-p2-c).
 
 ## Tech Stack
 

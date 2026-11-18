@@ -477,6 +477,104 @@ thread/新运行、memory 与 SQLite `:memory:` 中部分/no-data LLM 异常的 
 方面的既有限制仍适用。把“有报告”视为成功的外部消费者须改为检查状态；trace 消费者
 可能看到新的 `tool_skipped`。没有进入 P2-C，也没有 Commit/Push。
 
+### 可复现离线 Benchmark（P2-C）
+
+开始前确认 `22a6d50`，工作区干净。P2-A 的 `EvaluationReport` 和 P2-B 的
+`ReliabilityReport` 已能序列化逐例报告、观测、trace、检查和汇总，CLI 已有两个
+单套件 JSON 入口。P2-C 仅增加编排和展示：`benchmark.py` 顺序调用原 Evaluator，
+`report_generator.py` 根据序列化结果生成报告，没有另写评分器。Dataset、fixtures、
+故障注入、生产 Workflow、金融逻辑和报告 Schema 均未改动，未新增依赖。
+
+```bash
+python examples/evaluate.py --suite benchmark --output-dir benchmark-results
+python -m app.evaluation.report_generator benchmark-results/evaluation-results.json --output benchmark-results/evaluation-report.md
+```
+
+第一条命令生成 `evaluation-results.json` 和 `evaluation-report.md`；第二条仅读取
+保存的 JSON，不执行 Agent。默认 `benchmark-results/` 已加入 Git ignore；自定义
+输出目录应放在版本控制之外或自行配置 ignore。它们是本地生成产物，不是已提交的
+公开报告；再次运行会替换这两个文件。原 baseline/reliability、JSON stdout、
+`--dataset` 和 `--output` 保持兼容。Benchmark 固定运行两个内置数据集，拒绝歧义的
+`--dataset`/`--output`；`--output-dir` 仅供 Benchmark 使用。`--lang` 调整内部研究
+报告语言；审计 Markdown 使用英文标题和稳定机器字段名。
+
+现有 Runner 为每例新建模型、fixture、trace 和内存 checkpoint；仅 checkpoint
+探测在同案例内有意共享 saver。显式脚本/Fake Model 和 fixture 不随真实 Provider
+配置切换，不加载 `.env`，telemetry 保持禁用，不调用金融/LLM API。源码元数据仅
+运行本地 `git rev-parse`/`git status`，不读取 remote 或凭据；非 Git 环境标为 unavailable。
+
+`stockmind-benchmark-v1` JSON 包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `benchmark_version`、`started_at`、`generated_at`、`elapsed_seconds` | 版本、UTC 执行/生成时间、实测编排耗时 |
+| `source_revision` | Git commit 和工作树是否 dirty；不声称当前未提交代码等于 HEAD |
+| `scope` | 两个套件、实际总案例数、Fake Model、合成数据和 checkpoint 范围 |
+| `baseline`、`reliability` | 原完整 JSON，含 Dataset/fixture 哈希、运行时版本及逐例原始证据 |
+| `baseline_counts` | 对已有 task_completed、grounded 布尔结果计数，供比例展示 |
+| `baseline_error_accounting` | 数据集错误预期、观测 State 错误、工具错误及原有失败案例 ID |
+| `metric_definitions` | 定义、JSON 来源路径及分母 |
+| `historical_comparison` | 明确标注的历史转录，含来源 commit、路径、章节 |
+| `status` | completed、completed_with_unsupported 或 completed_with_failures |
+
+当前指标表直接读取这些字段，不硬编码本次分数。两个产物均保留全部 Case ID 和终止
+状态，fail/unsupported 展示原因，失败案例还展示实际异常文本。Markdown 不堆积长
+trace，JSON 保留完整内容。显示时对比例/耗时取舍小数位，JSON 保留原精度；同一 JSON
+再次生成 Markdown 内容一致，但重跑 Benchmark 不承诺时间戳和耗时相同。
+
+指标继续采用现有定义：
+
+- P2-A 完成要求全部规则通过，不是仅有报告；grounding 复用生产 assembler，并非
+  独立金融真值。工具评分是所有案例的无权重 macro 集合 P/R/F1，不衡量自主规划能力，
+  不新增任意加权总分。
+- 工具错误是 `actual_calls` 中 error 非空的实际尝试，State 错误还包含被阻止的请求。
+  预期工具错误按声明的数据集错误文本匹配，匹配本身不表示案例完成。非预期失败 ID
+  来自原有 completion/grounding=false 或 failure_reasons。当前基线预期/实际 State
+  错误为 3，但工具错误尝试仅 2；错误 ticker 请求在执行前被拒绝。
+- 安全终止仍为通过的适用案例 / 全部适用案例；恢复仍为通过且恢复的案例 / 所有声明
+  恢复预期的案例，包含 unsupported。直接使用 P2-B 的分子、分母及 unsupported 数量，
+  不另算排除口径；零分母仍为 null，安全违规保留可检查证据。
+- 任一套件出现原有非预期失败时，整体为 completed_with_failures；否则有 unsupported
+  则为 completed_with_unsupported，否则 completed。CLI 退出码 0 仅表示产物写出，
+  CI 须检查 status 和套件 verdict，不能理解为全部案例通过。预期的受控失败不会被
+  重新算成可靠性检查失败。
+
+历史来源：仓库没有跟踪历史原始评估 JSON。Historical Before（9/2/1、安全终止
+8/10、恢复 7/8、违规 1）和 Historical After Fix（11/0/1、10/10、7/8、违规 0）
+均转录自 `22a6d5039547a1d102f9e29ebd48c4f4c96b2292` 的 `docs/codex-log.md`，
+章节 `2026-11-17 — P2-B Fix：Agent Reliability Hardening`，对应同批重复执行及
+LLM error 被 finished 覆盖的两项问题。两列都不是在当前 Workflow 上重新计算；
+当前实测单独展示，即使它出现回归或与 Historical After 不同。新 Benchmark 不依赖
+任何 `/tmp` 历史文件。
+
+实际验证（2026-11-17 America/Los_Angeles；报告时间戳使用 UTC）：
+
+- `.venv/bin/python examples/evaluate.py --suite benchmark --output-dir /tmp/stockmind-p2-c-benchmark`：
+  24 例，整体 **completed_with_unsupported**。P2-A 完成及 grounding **12/12**，
+  macro P/R/F1 **1.0**，25 次尝试、3 个预期 State 错误、2 次预期工具错误、0 个
+  非预期失败。P2-B **11 pass / 0 fail / 1 unsupported**，安全终止 **10/10**，
+  恢复 **7/8**，安全违规 **0**。最终本地编排耗时 0.4523 秒，不是其他机器或真实
+  服务的性能承诺。
+- `.venv/bin/python -m app.evaluation.report_generator /tmp/stockmind-p2-c-benchmark/evaluation-results.json --output /tmp/stockmind-p2-c-benchmark/evaluation-report-regenerated.md`：
+  Markdown 与原报告逐字节相同。
+- `.venv/bin/python -m pytest tests/test_benchmark.py tests/test_evaluation.py tests/test_reliability_evaluation.py -v`：
+  **93 passed**（5.01 秒），其中 **17 项新增测试**。
+- `.venv/bin/python -m pytest -v`：**263 passed、0 failed、0 skipped**（按继续指令最终重跑 17.69 秒；首次完整运行 18.25 秒），
+  一条沙箱 pytest 缓存写入权限警告。
+- `.venv/bin/python -m compileall -q app tests examples`：获准写入字节码后通过；首次
+  沙箱执行因 PermissionError 失败。
+- `git diff --check`：通过。实际产物位于仓库外的 `/tmp`。
+
+测试还故意使基线和可靠性案例构造失败，确认 failed、实际错误和 unsupported 都保留
+在两个产物中；扰动输入分数以识别硬编码，验证分母/来源标记、重复运行、阻止网络和
+真实 Provider 选择、自定义/默认目录、无 Agent 的重生成及旧 CLI 兼容。首次定向测试
+发现 Markdown 缺少具体异常文本（92 passed、1 failed），已修正 renderer，没有改评分。
+
+这不是真实 LLM Benchmark、真实行情准确性验证、独立金融事实核查、完整真实 Provider
+故障测试，也不能证明适合自动交易或投资决策。END timeout checkpoint 仍 unsupported。
+机器负载、短模拟超时、依赖版本及 dirty 工作树限制精确复现；已记录输入哈希和包版本，
+但未验证所有依赖组合。没有进入 P3，也没有 Commit/Push。
+
 ### Prompt 记录
 
 `promptlog/` 是一个独立的本地 prompt 记录工具：

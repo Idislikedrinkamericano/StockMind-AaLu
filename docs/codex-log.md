@@ -1685,3 +1685,472 @@ Engineering Notes 记录：
 
 本轮未 Commit 或 Push，没有新增 Commit ID；7081acb 是开始前已存在的用户提交。
 
+
+## 2026-11-17 — P2-C：Evaluation Report & Reproducible Benchmark
+
+日期按 America/Los_Angeles 记录；生成报告中的执行时间戳为 UTC。
+
+### 用户完整原始 Prompt（附件内容）
+
+````text
+# StockMind — P2-C：Evaluation Report & Reproducible Benchmark
+
+## 一、项目背景
+
+StockMind 已完成 P2-A、P2-B 和 P2-B Fix。
+
+最新 Commit：22a6d50。
+
+当前验证基线：
+
+- 完整 pytest：246 passed
+- P2-A：12/12 task completion、12/12 grounding
+- P2-A scripted tool-selection macro precision / recall / F1：1.0
+- P2-B Fix：11 pass、0 fail、1 unsupported
+- Safe Termination Rate：10/10 = 100%
+- Recovery Rate：7/8 = 87.5%
+- Safety Violation Count：0
+
+以上均为离线 scripted evaluation，不代表真实 LLM 或真实 Provider 的表现。
+
+本轮目标是将现有评估能力整理为可复现、可审计、可用于 GitHub 展示的 Evaluation Report & Benchmark。
+
+不增加新的 Agent 功能，不修改生产金融分析逻辑。
+
+## 二、先审计现有评估实现
+
+检查：
+
+- app/evaluation/
+- app/evaluation/datasets/
+- examples/evaluate.py
+- app/observability/
+- tests/test_evaluation.py
+- tests/test_reliability_evaluation.py
+- tests/test_reliability_hardening.py
+- README.md
+- README.zh-CN.md
+- docs/engineering-notes.md
+- docs/engineering-notes.zh-CN.md
+
+确认：
+
+1. P2-A 和 P2-B 的实际数据结构。
+2. 当前 CLI 支持的评估入口及输出格式。
+3. 每项指标的真实定义与分母。
+4. 是否已经存在可复用的 JSON 序列化和汇总逻辑。
+5. 如何生成可复现的评估报告而不重复实现评分器。
+
+优先复用现有代码，不重新设计 Evaluation Framework。
+
+## 三、统一 Benchmark Runner
+
+在现有 CLI 基础上提供一个清晰的离线 Benchmark 入口。
+
+目标：开发者使用一条明确的命令，即可执行完整 P2-A + P2-B 评估并生成结果。
+
+要求：
+
+1. 完全离线运行。
+2. 不读取真实 .env 或 API Key。
+3. 不调用真实 LLM、yfinance、AkShare 或其他外部服务。
+4. 保留现有 P2-A / P2-B 评估入口的兼容性。
+5. 每次运行使用独立的临时状态和 checkpoint。
+6. 结果包含 dataset version、执行时间、指标定义和运行状态。
+7. 允许用户指定输出目录。
+8. 不向仓库提交本地临时结果。
+9. 如果已有命令满足要求，只做必要的小幅扩展。
+
+不得为了统一入口而重构 Agent。
+
+## 四、Evaluation Report
+
+生成一份适合 GitHub 阅读的 Markdown 报告。
+
+建议输出：
+
+- evaluation-report.md
+- evaluation-results.json
+
+报告至少包含：
+
+### A. Benchmark Scope
+
+说明：
+
+- Benchmark 版本
+- Dataset 数量
+- Scripted LLM / Fake Model
+- Mock Financial Providers
+- Offline Execution
+- Checkpoint 类型
+- 已覆盖和未覆盖的能力
+
+明确区分：
+
+- Agent Workflow 测试
+- Scripted Tool Execution
+- Grounding Consistency
+- Reliability Evaluation
+- Real-world LLM Performance
+
+### B. P2-A Agent Evaluation
+
+包含：
+
+- Task Completion
+- Tool Selection Precision / Recall / F1
+- Grounding
+- Tool Call Count
+- Tool Error Count
+- Execution Latency
+
+必须说明：
+
+- Scripted Tool Selection F1 = 1.0 不代表真实 LLM 工具选择能力。
+- Grounding 复用生产报告组装器，不是独立金融事实核查。
+- Expected Tool Errors 与 Unexpected Failures 必须分开。
+
+### C. P2-B Reliability Evaluation
+
+包含：
+
+- 12 个 Reliability Cases
+- Pass / Fail / Unsupported
+- Safe Termination Rate
+- Recovery Rate
+- Safety Violation Count
+- Failure Categories
+- Checkpoint Coverage
+
+指标必须与当前 Evaluation 实现保持一致。
+
+不得将 Unsupported 从 Recovery Rate 分母中偷偷排除。
+
+### D. Before / After Comparison
+
+整理已验证的 P2-B 修复前后对比：
+
+Before：
+
+- 9 pass / 2 fail / 1 unsupported
+- Safe Termination Rate：80%
+- Recovery Rate：87.5%
+- Safety Violation Count：1
+
+After：
+
+- 11 pass / 0 fail / 1 unsupported
+- Safe Termination Rate：100%
+- Recovery Rate：87.5%
+- Safety Violation Count：0
+
+说明两项真实缺陷：
+
+1. 同批次重复工具调用。
+2. 未恢复 LLM 异常仍被标记为 finished。
+
+重要：
+
+修复前数字属于历史评估结果。
+
+不要在当前修复后的 Workflow 上重新运行，然后声称得到历史修复前结果。
+
+如果仓库中没有可机器验证的历史原始结果，应明确标注这些数字来自历史开发记录，而不是当前 Benchmark 重新计算。
+
+### E. Limitations
+
+必须明确披露：
+
+- 不是真实 LLM Benchmark。
+- 不是真实市场行情准确性验证。
+- 没有独立的金融真值验证。
+- 没有完整的真实 Provider 故障覆盖。
+- 已到 END 的 timeout checkpoint 不支持直接恢复。
+- 不能证明系统适合自动交易或投资决策。
+- 运行时间可能因机器而变化。
+
+## 五、报告生成方式
+
+优先基于现有 Evaluation JSON 自动生成 Markdown。
+
+要求：
+
+1. 报告中的当前指标来自实际评估输出。
+2. 不手工硬编码当前评估分数。
+3. 报告中每个指标可追溯到对应 JSON 字段。
+4. 每个案例保留 Case ID 和最终状态。
+5. 明确报告生成时间和 Dataset Version。
+6. JSON 保留足够的原始结果供复核。
+7. 不引入 Pandas、Plotly、Matplotlib 等非必要依赖。
+8. 报告内容简洁，避免生成冗长的机器日志。
+
+历史 Before / After 对比可以使用有明确来源标注的历史固定数据，但不能伪装为本次执行结果。
+
+## 六、可复现性
+
+增加必要的离线测试，验证：
+
+1. Benchmark CLI 能成功运行。
+2. JSON 与 Markdown 能正确生成。
+3. 报告数字与 JSON 一致。
+4. Dataset 版本和案例数量正确。
+5. Failed / Unsupported 案例不会被遗漏。
+6. Safe Termination 和 Recovery 的分母正确。
+7. 历史 Before 数据与当前运行数据来源明确区分。
+8. 输出目录可配置。
+9. 不依赖真实 API Key。
+10. 原有 Evaluation CLI 不回归。
+
+如有必要，可以加入固定顺序和稳定字段，使报告易于比较。
+
+不要为了使结果看起来更好而修改评分逻辑、Dataset 或 Fixtures。
+
+## 七、GitHub 展示
+
+在 README.md 和 README.zh-CN.md 增加一个简洁的 Evaluation 小节。
+
+建议包括：
+
+- 一条离线 Benchmark 命令
+- 核心评估指标
+- 评估报告的位置
+- Scripted / Offline 限制
+
+README 不要堆积全部 12 个案例，也不要重复整份报告。
+
+如果报告输出默认位于本地目录，请明确它是生成产物，而不是已经提交的 GitHub 文档。
+
+不要生成虚假的徽章或未经验证的性能宣传。
+
+## 八、文档同步
+
+更新：
+
+- README.md
+- README.zh-CN.md
+- docs/engineering-notes.md
+- docs/engineering-notes.zh-CN.md
+
+Engineering Notes 详细说明：
+
+- Benchmark 架构
+- Runner 使用方式
+- Report Schema
+- Metric Definitions
+- Historical Comparison Provenance
+- Reproducibility Limitations
+
+保持中英文一致，避免夸大。
+
+## 九、Codex 日志
+
+向 docs/codex-log.md 追加：
+
+- P2-C 阶段和日期
+- 本次完整原始 Prompt
+- 关键实现决策
+- 修改文件
+- 实际 Benchmark 命令
+- 实际评估结果
+- 完整测试结果
+- 已知限制
+
+必须保留此前所有日志，不得覆盖历史内容。
+
+不得记录密钥、Token 或真实 .env 内容。
+
+## 十、范围限制
+
+本轮禁止：
+
+- 修改生产 Workflow
+- 修改 State 和 Checkpoint 语义
+- 修改真实 Provider
+- 修改金融计算公式
+- 修改报告 Schema
+- 修改 P2-A / P2-B 评分标准以提高分数
+- 增加新的金融工具
+- 增加真实 LLM 评估
+- 增加 LLM-as-Judge
+- 开发 Web 新功能
+- 进入 P3
+- Commit / Push
+
+允许新增最小必要的 Benchmark Runner、Report Generator、测试和文档。
+
+## 十一、最终验证
+
+运行：
+
+- 完整离线 Benchmark
+- 报告生成
+- Benchmark / Report 定向测试
+- 完整 pytest
+- compileall
+- git diff --check
+
+检查所有新增文件和生成产物的位置，避免误提交临时数据。
+
+## 十二、最终汇报
+
+完成后用中文汇报：
+
+1. Benchmark 的运行命令。
+2. 实际生成的文件及路径。
+3. P2-A 和 P2-B 当前评估结果。
+4. Before / After 对比的数据来源。
+5. 新增测试数量及完整 pytest 结果。
+6. README 和 Engineering Notes 更新情况。
+7. 可复现性保证及限制。
+8. 尚未解决的问题。
+
+完成 P2-C 后停止，等待验收，不要进入 P3。
+````
+
+### 用户继续任务的完整 Prompt
+
+````text
+继续上次因额度限制中断的 StockMind P2-C Evaluation Report & Reproducible Benchmark。
+
+请保留当前工作区所有修改，不要重新开始或覆盖已完成的实现。
+
+已知进度：
+
+- 完整 pytest：263 passed
+- 新增 17 项 Benchmark / Report 测试
+- P2-A + P2-B：共 24 个案例
+- 统一 Benchmark Runner 已实现
+- JSON 和 Markdown 报告生成已实现
+- 从保存的 JSON 重新生成 Markdown，内容逐字节一致
+- 总体状态：completed_with_unsupported
+- 历史修复前后指标已明确标记来自开发记录
+- 报告已补充失败案例的具体错误原因
+
+请完成剩余工作：
+
+1. 检查 git status 和 git diff，确认当前修改完整。
+2. 检查统一 Benchmark CLI 的实际运行命令及输出文件路径。
+3. 确认生成的 JSON / Markdown 不会被误提交。
+4. 完成 README.md 和 README.zh-CN.md 的同步。
+5. 完成 docs/engineering-notes.md 和 docs/engineering-notes.zh-CN.md 的同步。
+6. 向 docs/codex-log.md 追加 P2-C 完整原始 Prompt、关键决策、修改文件、实际测试结果和限制，保留全部历史内容。
+7. 重新运行完整 pytest、compileall 和 git diff --check。
+8. 检查新增文件、测试和 .gitignore 是否完整。
+9. 确认没有修改生产 Workflow、Provider、金融公式、报告 Schema 或评估评分标准。
+
+最后用中文汇报：
+
+- 实际 Benchmark 命令
+- 生成的 JSON 和 Markdown 路径
+- P2-A / P2-B 的完整指标
+- 历史 Before / After 的数据来源
+- 完整 pytest 结果
+- 新增及修改文件
+- 可复现性与已知限制
+
+不要进入 P3，不要 Commit / Push。
+
+完成后停止，等待验收。
+````
+
+### 审计与关键技术决策（Codex 回复摘要，非逐字文本）
+
+- 开始时 git status/diff 干净，HEAD 为用户已提交的 `22a6d50`。检查现有 Evaluation、datasets、CLI、Tracing、三个评估测试模块和中英文文档。收到继续指令后保留全部现有修改，再检查状态，没有重新实现或覆盖工作。
+- 现有 EvaluationReport/ReliabilityReport 已保留逐例 report、observations、调用记录、错误、checks、metrics、汇总、数据哈希及运行时版本。CLI 已支持 baseline/reliability 及 JSON 序列化。因此只增加最小 Benchmark 编排、JSON 包装和 Markdown 展示，不另写评分器。
+- `--suite benchmark` 顺序运行原 P2-A 与 P2-B Runner，使用原有固定 synthetic-v1、ScriptedReActDemoModel/FaultModel 和评估 fixture。每例新建 Agent/State/trace/内存 checkpoint；只有案例内的 checkpoint 探测共享 saver。不加载真实 .env，不按 API Key 选择真实服务，不调用外部金融或 LLM API，不增加依赖。
+- JSON 包装版本 stockmind-benchmark-v1，保留两个完整套件，增加 UTC 时间、实测编排耗时、Git commit/dirty 标记、scope、指标定义及字段路径、错误分类和明确标注的历史来源。读取 Git 只用本地 rev-parse/status，不读取 remote 或凭据；非 Git 安装环境记录 unavailable。
+- 当前指标来自执行结果。仅对既有布尔结果/错误记录计数用于展示，不修改评分。Markdown 从序列化后的 JSON 模型生成；另提供只读 JSON 的重生成命令，不调用 Agent。每个案例包含 Case ID、终止状态及失败/unsupported 原因，长 trace 保留在 JSON。
+- Tool error attempts 与 State errors 分开：当前 P2-A 实际工具错误 2 次，State 错误 3 个，第三个是执行前被拒绝的 ticker 请求。根据 Dataset 声明文本标记预期错误；意外失败使用原有 completion/grounding/failure_reasons，不把捕获异常算成完成。
+- Safe Termination 和 Recovery 直接读取 P2-B 的分子/分母，unsupported 不移出声明恢复分母。整体状态优先 completed_with_failures，其次 completed_with_unsupported，否则 completed；CLI 返回 0 代表文件写出，不代表所有案例通过。
+- 仓库未跟踪历史原始评估 JSON。报告的 Historical Before 和 Historical After Fix 固定值均明确转录自提交 `22a6d5039547a1d102f9e29ebd48c4f4c96b2292` 的 docs/codex-log.md，章节“2026-11-17 — P2-B Fix：Agent Reliability Hardening”。它们不是当前 Workflow 重新计算值，也不依赖此前 /tmp 文件；当前测量单独展示。
+- 原 CLI baseline/reliability、--dataset、--output 和 stdout JSON 兼容保留。Benchmark 固定使用两份版本化数据集，新增 --output-dir（默认 benchmark-results），拒绝与 --dataset/--output 混用。--lang 控制内部研究报告，审计 Markdown 使用英文标题/机器字段。
+- 默认 benchmark-results/ 加入 .gitignore；本次实际输出在仓库外 /tmp。自定义目录需要使用者保证不进入版本控制。没有创建或提交仓库内的报告产物。
+
+### 实际修改与新增文件
+
+| 文件 | 内容 |
+| --- | --- |
+| `app/evaluation/benchmark.py`（新增） | 复用两个 Runner，版本化 JSON、来源/时间/错误分类、产物写出 |
+| `app/evaluation/report_generator.py`（新增） | 从 JSON 生成 Markdown，提供无 Agent 的重生成 CLI |
+| `tests/test_benchmark.py`（新增） | 17 项离线 Benchmark/Report 回归 |
+| `examples/evaluate.py` | 新增 --suite benchmark/--output-dir，保留原入口 |
+| `.gitignore` | 忽略默认 benchmark-results/ |
+| `README.md`、`README.zh-CN.md` | 一条统一命令、实测核心指标、产物位置与离线限制 |
+| `docs/engineering-notes.md`、`docs/engineering-notes.zh-CN.md` | 编排、Schema、指标、历史来源、复现与实际验证 |
+| `docs/codex-log.md` | 仅追加本阶段原始 Prompt、继续指令、决策及结果 |
+
+共 10 个文件：7 个已跟踪修改、3 个新增文件。生产 Workflow、State/Checkpoint 语义、Provider、金融公式、报告 Schema、原评分器、Dataset、Fixtures、Failure Injection 和依赖配置均无 diff。
+
+### 实际 Benchmark 命令与生成产物
+
+```bash
+.venv/bin/python examples/evaluate.py --suite benchmark --output-dir /tmp/stockmind-p2-c-benchmark
+.venv/bin/python -m app.evaluation.report_generator /tmp/stockmind-p2-c-benchmark/evaluation-results.json --output /tmp/stockmind-p2-c-benchmark/evaluation-report-regenerated.md
+```
+
+两个命令实际执行且退出码 0。生成：
+
+- /tmp/stockmind-p2-c-benchmark/evaluation-results.json
+- /tmp/stockmind-p2-c-benchmark/evaluation-report.md
+- /tmp/stockmind-p2-c-benchmark/evaluation-report-regenerated.md（独立重生成验证产物）
+
+报告与重生成报告逐字节一致。JSON 为 220,545 字节，两个 Markdown 均为 13,244 字节；这些大小仅对应本次实际输出，不作为稳定性承诺。再次读取保存 JSON 并运行 renderer，仍与报告完全一致。
+
+最终记录的 Benchmark 开始于 UTC 2026-11-18T02:56:34.033243+00:00，编排耗时 0.4523073339369148 秒；记录 HEAD=22a6d50、worktree_dirty=true，如实反映本轮尚未提交实现，不声称 HEAD 单独包含新 Benchmark。
+
+### 实际评估结果
+
+共 2 个 Dataset、24 个案例，整体 **completed_with_unsupported**。
+
+| 指标 | P2-A | P2-B Reliability |
+| --- | --- | --- |
+| Dataset version | stockmind-eval-v1 | stockmind-reliability-v1 |
+| 案例数 | 12 | 12 |
+| P2-A 定义的 task completion | 12/12 | 9/12（预期 error/timeout 不属于 finished） |
+| Grounding consistency | 12/12 | 12/12 |
+| Macro tool precision / recall / F1 | 1.0 / 1.0 / 1.0 | 1.0 / 1.0 / 1.0 |
+| 实际工具尝试 | 25 | 16 |
+| State errors | 3 | 6 |
+| 平均执行耗时 | 5.702861167568092 ms | 18.9580208195063 ms |
+
+P2-A 的 3 个 State 错误均为预期场景；实际工具错误尝试 2 次且均匹配预期文本，不匹配工具错误 0，非预期失败案例 0。
+
+P2-B：**11 pass / 0 fail / 1 unsupported**；Safe Termination **10/10=100%**；Recovery **7/8=87.5%**（分母含 unsupported 1）；Safety Violation Count **0**。分类为正常完成 2、安全降级 7、受控失败 2、非预期失败 0、unsupported 1。原 END timeout checkpoint 案例保留 unsupported。完整逐例状态、观测、错误和分母在 JSON/Markdown 中，没有丢弃失败案例。
+
+历史对比单独标注为开发记录：Before 9/2/1、80%、87.5%、违规 1；After Fix 11/0/1、100%、87.5%、违规 0。这两列不伪装成当前运行重算结果，也不会随当前回归测试的故意失败而改写。
+
+### 实际测试及验证过程
+
+复用 .venv（Python 3.12.8、pytest 9.2.0），没有安装或升级依赖。
+
+| 命令 / 验证 | 实际结果 |
+| --- | --- |
+| 定向：`.venv/bin/python -m pytest tests/test_benchmark.py tests/test_evaluation.py tests/test_reliability_evaluation.py -v`（首次） | 92 passed、1 failed，5.22 秒；发现 Markdown 未展示具体 construction failure 文本 |
+| 上述定向命令（修复 renderer 后） | 93 passed、0 failed，5.01 秒；1 条 pytest 缓存权限警告 |
+| `.venv/bin/python -m pytest -v`（首次完整回归） | 263 passed、0 failed、0 skipped，18.25 秒；1 条缓存权限警告 |
+| `.venv/bin/python -m pytest -v`（继续指令后重新执行） | 263 passed、0 failed、0 skipped，17.69 秒；1 条缓存权限警告 |
+| `.venv/bin/python -m compileall -q app tests examples`（首次沙箱执行） | 退出码 1；__pycache__ 写入 PermissionError，属于环境权限问题 |
+| 同一 compileall 命令（获准执行） | 退出码 0，无输出 |
+| 同一 compileall 命令（继续指令后重新执行） | 退出码 0，无输出 |
+| `git diff --check` | 退出码 0，无空白错误 |
+| `git check-ignore benchmark-results/evaluation-results.json benchmark-results/evaluation-report.md` | 两个默认路径均被忽略 |
+| 原始/重生成 Markdown 字节比较 | 完全一致 |
+| 产物 Git 跟踪检查 | 没有生成的 evaluation-results.json / evaluation-report.md 被跟踪 |
+
+首次失败通过补充“失败案例的实际错误文本”修正，只改 renderer，不降低断言或改评分。新增 17 项测试验证整体 CLI、两个产物、当前分数非硬编码、版本/案例数、真实 Runner 注入失败保留、unsupported/零分母、历史标签独立、默认/自定义目录、不加载 dotenv/不调用真实 Provider 或网络、同 JSON 重生成、重复运行和旧 CLI。既有 246 项全部保留。
+
+### 可复现性与已知限制
+
+- 固定输入、运行顺序、Dataset/fixture 哈希和已有指标定义；记录 Python/包版本及 Git 状态。同一 JSON 渲染结果相同，重跑的时间戳、耗时和观测取回时间不保证逐字节相同。
+- 未提交工作区标记为 dirty；没有锁定或测试所有依赖组合，不能承诺任意机器分数/超时相同。短模拟超时在极慢环境可能产生额外失败，报告会保留它们。
+- 历史原始 JSON 不在 Git 中，Before/After 是明确引用 commit/章节的开发记录，不是机器可验证的历史原始结果。
+- 不是真实 LLM Benchmark、实时市场数据准确性验证、独立金融真值验证或完整真实 Provider 故障测试；不能据此宣称适合自动交易或投资决策。
+- Grounding 仍与生产 assembler 共用 oracle；END timeout checkpoint 没有待执行节点，直接恢复仍 unsupported。没有增加新恢复机制、同步网络线程取消或跨进程恢复验证。
+- 命令成功退出只表示产物写出；CI 应读取整体 status 和逐套件 verdict。自定义输出目录不保证自动被 Git 忽略，建议放在仓库外。
+- 没有读取/修改真实 .env、记录凭据或调用付费 API；未进入 P3。
+
+### Git Commit 信息
+
+未 Commit / Push，没有新增 Commit ID。22a6d50 为本轮开始前用户已提交的基线。
+
