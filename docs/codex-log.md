@@ -946,3 +946,438 @@ README 只简要说明如何运行 Evaluation，以及当前评估的适用范�
 
 本轮未执行 Commit 或 Push，没有新增 Commit ID。
 
+
+## 2026-11-17 — P2-B：Agent Reliability Evaluation
+
+### 用户原始 Prompt
+
+以下保留本阶段完整原始任务文本。
+
+````text
+# StockMind — P2-B：Agent Reliability Evaluation
+
+## 一、项目背景
+
+StockMind 已完成：
+
+- P0–P1-D：安全性、数据质量与估值正确性
+- Cleanup-A / Cleanup-B
+- Finalize Optimization
+- P2-A：Agent Evaluation Baseline
+
+当前完整测试基线：182 passed。
+
+P2-A 已建立：
+
+- `stockmind-eval-v1`，12 个离线评估案例
+- EvaluationDataset
+- Evaluation Runner
+- 固定合成 Fixtures
+- Tool Selection Precision / Recall / F1
+- Task Completion、Grounding 和执行指标
+- 离线 CLI
+
+现在开始 P2-B，重点验证 Agent 在异常条件下的可靠性。
+
+本轮只扩展 Evaluation，不增加新的股票研究功能，不修改生产 Agent 的核心执行逻辑。
+
+## 二、先审计现有能力
+
+检查：
+
+- `app/evaluation/`
+- `app/graph/workflow.py`
+- `app/graph/state.py`
+- `app/graph/checkpoint.py`
+- `app/agents/react_agent.py`
+- `app/observability/`
+- `examples/evaluate.py`
+- 相关测试
+
+确认现有代码如何处理：
+
+1. Tool exception
+2. Tool timeout
+3. Invalid tool arguments
+4. Wrong ticker
+5. Repeated tool calls
+6. LLM exception / timeout
+7. Partial observations
+8. Checkpoint recovery
+
+区分已经存在的生产保护机制与尚未具备的评估能力。
+
+不要重新实现已有的保护机制。
+
+## 三、扩展 Reliability Dataset
+
+在现有 P2-A Dataset 基础上，增加版本化 Reliability Cases。
+
+建议增加 8–12 个案例，覆盖：
+
+- 金融数据 Provider 抛出异常
+- 工具执行超时
+- 非法工具参数
+- 错误 ticker 工具请求
+- 重复调用同一工具
+- LLM 返回无效工具请求
+- LLM 执行失败
+- 部分工具成功、部分工具失败
+- 数据缺失
+- Checkpoint 恢复
+
+每个案例应包含：
+
+- Case ID
+- Scenario Type
+- User Query
+- Ticker
+- Failure Injection
+- Expected Terminal Status
+- Expected Recovery / Termination Behavior
+- Safety Constraints
+
+只使用离线 Fake Model、Mock Provider 和可控 Fixtures。
+
+不得调用真实 LLM 或金融 API。
+
+对于现有架构不支持的恢复行为，应如实记录，不得为了获得通过结果而修改生产逻辑。
+
+## 四、Failure Injection
+
+在 Evaluation 层实现最小必要的故障注入能力。
+
+支持按案例模拟：
+
+- 工具抛出异常
+- 工具超时
+- 工具返回缺失或无效数据
+- LLM 抛出异常
+- LLM 超时
+- 重复工具请求
+- 错误 ticker 请求
+
+要求：
+
+1. 故障注入仅在 Evaluation 中生效。
+2. 不修改真实 Provider。
+3. 不修改生产工具计算逻辑。
+4. 不绕过 LangGraph 正常执行路径。
+5. 不依赖真实网络或外部服务。
+6. 不使用不受控的长时间 sleep。
+7. 每个案例独立，避免故障状态污染其他案例。
+
+## 五、Reliability Metrics
+
+在 P2-A 指标基础上，增加：
+
+### 1. Safe Termination Rate
+
+在预期需要安全终止的案例中，统计符合终止条件的比例。
+
+必须区分：
+
+- 正常完成
+- 安全降级
+- 受控失败
+- 非预期失败
+
+不能把所有异常都算作成功。
+
+### 2. Recovery Rate
+
+仅对预期允许恢复的案例计算：
+
+成功恢复案例数 / 预期可恢复案例数。
+
+明确恢复的判定条件，例如后续工具调用成功、获得有效部分报告或恢复 checkpoint。
+
+不得把单纯捕获异常视为成功恢复。
+
+### 3. Safety Violation Count
+
+统计：
+
+- 未经验证的金融数值进入报告
+- 错误 ticker 数据进入报告
+- 缺失数据被描述为确定事实
+- 失败状态被误报为成功
+
+每项违规必须有可检查的证据。
+
+### 4. Failure Handling
+
+记录：
+
+- Injected Failure Type
+- Observed Error
+- Terminal Status
+- Recovery Attempt
+- Recovery Outcome
+- Failure Reason
+
+### 5. Execution Metrics
+
+沿用 P2-A：
+
+- Tool Calls
+- Error Count
+- Latency
+- Final Status
+
+明确区分真实观测值和预期标签。
+
+## 六、Checkpoint Evaluation
+
+设计离线测试验证：
+
+1. 同一 thread 的状态保存与恢复。
+2. 不同 thread 之间的状态隔离。
+3. 恢复后不会混入其他 ticker 的 observation。
+4. 恢复失败时不会伪造成功状态。
+5. 不依赖外部数据库或真实金融数据。
+
+如果当前 Checkpoint 机制不能支持某类恢复场景，应标记 unsupported，而不是人为制造通过结果。
+
+## 七、评估结果
+
+扩展现有 JSON Schema，保留 P2-A 指标。
+
+每个 Reliability Case 至少记录：
+
+- Case ID
+- Scenario
+- Injected Failure
+- Expected Behavior
+- Observed Behavior
+- Terminal Status
+- Recovery Outcome
+- Safety Violations
+- Execution Metrics
+- Pass / Fail / Unsupported
+
+汇总结果必须：
+
+1. 包含失败案例。
+2. 单独列出 Unsupported。
+3. 明确分母。
+4. 不将预设脚本的结果宣传为真实 LLM 可靠性。
+5. 不使用任意加权总分掩盖失败。
+
+## 八、测试要求
+
+增加离线回归测试，至少覆盖：
+
+1. Failure Injection 正确触发。
+2. 工具异常与超时。
+3. 无效参数和错误 ticker。
+4. 重复调用。
+5. LLM 异常与超时。
+6. 部分数据失败。
+7. Checkpoint 状态恢复与隔离。
+8. Safe Termination Rate 和 Recovery Rate 的分母。
+9. Unsupported 不被算作成功。
+10. Safety Violation 检测。
+11. JSON 输出可序列化。
+12. 原有 12 个 P2-A 案例不回归。
+
+运行完整 pytest、compileall 和 git diff --check。
+
+不要为了通过测试而降低现有安全标准。
+
+## 九、文档同步
+
+根据实际实现更新：
+
+- README.md
+- README.zh-CN.md
+- docs/engineering-notes.md
+- docs/engineering-notes.zh-CN.md
+
+README 只简要介绍 Reliability Evaluation 的运行方式与限制。
+
+详细指标定义、故障注入设计和测试结果放入 engineering notes。
+
+## 十、Codex 开发日志
+
+向 `docs/codex-log.md` 追加：
+
+- P2-B 日期及阶段
+- 本次完整原始 Prompt
+- 关键设计决策
+- 实际修改文件
+- 测试命令和结果
+- 已知限制及后续建议
+
+保留所有历史记录，不覆盖、不编造。
+
+不得记录 API Key、Token 或真实 `.env` 内容。
+
+## 十一、严格限制
+
+- 不增加金融分析工具。
+- 不修改金融公式。
+- 不修改真实 Provider。
+- 不修改生产 ReAct / LangGraph 核心逻辑。
+- 不修改生产报告 Schema。
+- 不增加 LLM-as-Judge。
+- 不调用外部 API。
+- 不修改真实 `.env`。
+- 不进入 P2-C。
+- 不 Commit / Push。
+
+## 十二、最终汇报
+
+请用中文说明：
+
+1. 现有 Reliability 保护机制的审计结果。
+2. 新增案例数量与覆盖范围。
+3. Failure Injection 实现方式。
+4. Reliability Metrics 定义。
+5. 实际评估结果（包含失败与 Unsupported）。
+6. 完整 pytest 测试结果。
+7. 修改文件和文档更新情况。
+8. 尚未解决的可靠性问题。
+
+完成 P2-B 后停止，等待验收。
+````
+
+### 用户继续任务的完整 Prompt
+
+````text
+继续上次因额度限制中断的 StockMind P2-B Agent Reliability Evaluation。
+
+请保留现有工作区修改，不要重新开始或覆盖已完成的内容。
+
+已知进度：
+
+- 定向测试：76 passed
+- Reliability Dataset：12 个案例
+- 当前结果：9 pass、2 fail、1 unsupported
+- 已发现同批次重复工具调用、LLM 异常后状态仍为 finished 的问题
+- 已结束的 timeout checkpoint 不支持直接恢复
+
+请完成以下工作：
+
+1. 检查当前 Git diff，确认现有实现完整。
+2. 运行完整 pytest 回归测试。
+3. 运行 compileall 和 git diff --check。
+4. 检查 Reliability Metrics 的分母、失败分类和 Unsupported 处理是否正确。
+5. 保留已发现的真实失败，不修改生产 Agent 来提高评估分数。
+6. 同步 README.md、README.zh-CN.md、两份 engineering notes。
+7. 向 docs/codex-log.md 追加本次完整 Prompt、开发决策、实际评估结果和测试结果，保留历史记录。
+8. 检查新增 Dataset、测试及其他文件是否都在最终修改清单中。
+
+完成后用中文报告：
+
+- 12 个案例的最终结果
+- Safe Termination Rate 和 Recovery Rate
+- 两项生产行为问题的证据
+- 完整测试结果
+- 修改文件
+- 剩余风险和 Unsupported 场景
+
+不要修改生产 Workflow、Provider 或金融公式。
+
+不要 Commit / Push，不要进入 P2-C。
+````
+
+### Codex 处理摘要（非逐字回复）
+
+阶段开始时 Git 工作树干净；收到继续任务指令后再次检查 diff，保留已有 Evaluation 实现和测试，没有重新开始或覆盖已完成内容。本阶段仅扩展评估、离线 CLI、测试及文档。
+
+先审查现有 Evaluation、Workflow、State、Checkpoint、Agent 和 Tracing。现有生产代码已经提供工具异常/超时重试、参数校验、错误 ticker/未知工具拒绝、前序步骤重复调用跳过、LLM/run timeout、取消传播和安全报告组装。P2-A 已提供固定 fixtures、顺序 Runner、trace 派生指标、工具集合和报告一致性检查，但缺少故障触发、恢复及 unsupported 的评价。
+
+### 关键决策与实现
+
+- 新增版本化 `stockmind-reliability-v1`，12 个案例，复用 `synthetic-v1`。预期行为、合法脚本、注入配置及实际观测分开保存；非法请求只在声明的模型边界注入，不放宽 P2-A 的 Dataset/参数校验。
+- `ReliabilityEvaluator` 复用原 Runner，仅增加构造/执行扩展点。故障由独立 Fake Model、评估 fixture 子类和保留生产参数 Schema 的本地工具包装器注入，仍走原生 LangGraph 执行路径。没有修改真实 Provider 或计算函数。
+- 工具/LLM 超时使用可取消 Event；单操作预算 0.05 秒、run 预算 2 秒、案例 watchdog 5 秒；仅两例允许一次重试，退避与 jitter 为零。取消不吞掉，不使用长 sleep，不访问网络。
+- 每例独立模型、fixture、trace、journal 和内存 saver。复用 TraceCollector 的调用/错误记录，不另造生产 tracing；journal 只证明注入及 checkpoint 行为。现有 State error count 不改为重复计数的 trace error count，已恢复的瞬时错误另见 observed_behavior。
+- 真正的 checkpoint 恢复使用编译后 graph 的原生 interrupt_after，在 tools 后暂停；另一个 AMD thread 正常运行，再用共享 saver 的新 NVDA Agent 读取完整状态、ainvoke(None) 恢复，验证 observation 不混入。
+- 对 END 后的 timeout 重读，实际确认 next 为空、报告和状态未变、新模型调用为零，再标记 unsupported。没有把新 arun 当作恢复；测试中的 saver 读取异常判为 fail，而非伪造恢复或标记 unsupported。
+- Grounding 继续复用生产 grounded/no-data 组装器；安全违规记录路径、预期/实际值和证据。保留 P2-A 指标，并单独输出 reliability 判定，避免将 finished 或报告存在当作全部成功。
+- 首轮 CLI 曾为 8 pass / 3 fail / 1 unsupported：新增 missing-data 案例误沿用了部分报告的 “Unavailable” 前缀断言，而生产 no-data 使用完整的不可用说明。审查原契约后，改为 no_data 模式、无价格和完整 assembler 一致性检查；未改变生产文案或放宽证据要求。最终为 9 pass / 2 fail / 1 unsupported。
+- CLI 默认仍运行 P2-A，新套件使用 --suite reliability；JSON 保留原字段，新增 reliability 和 reliability_aggregate。未增加依赖，已有 package-data 通配规则包含新 Dataset。
+
+### 实际评估结果与分母
+
+| Case ID | 结果 | 依据 |
+| --- | --- | --- |
+| provider-retry | pass | 首次 Provider 异常，第二次尝试有有效价格 |
+| tool-timeout-retry | pass | 首次等待被取消，重试有有效价格 |
+| invalid-arguments | pass | RSI 参数被 ValidationError 拒绝，后续价格成功 |
+| wrong-ticker-request | pass | AMD 请求被 NVDA run 拒绝，修正后成功 |
+| duplicate-same-batch | fail | 两次相同请求实际执行两次，预期至多一次 |
+| unknown-tool-request | pass | 不存在的工具被拒绝，后续正常调用成功 |
+| llm-exception-partial | fail | 保留错误及安全部分报告，但最终 status 为 finished |
+| llm-timeout-partial | pass | status=timeout，保留价格，没有后续新闻调用 |
+| invalid-observation-partial | pass | 错误 ticker 价格被过滤，财务数据仍有独立支持 |
+| missing-data | pass | 空 payload 返回无数值的 no-data 报告 |
+| checkpoint-paused-resume | pass | 同 thread 恢复成功，其他 thread/ticker 隔离 |
+| checkpoint-terminal-retry | unsupported | 已到 END，无待执行节点，只读回旧 timeout 状态 |
+
+- Safe Termination Rate：**8/10 = 80%**。分母为标记需要安全终止的 10 例，不含两个 checkpoint 恢复探测；同批重复调用违反其“至多一次”要求，计失败。
+- Recovery Rate：**7/8 = 87.5%**。分母为声明恢复预期的 8 例，含 1 个 unsupported，不把 unsupported 算成功。重试/后续工具/部分报告均要求实际成功及满足输出约束，捕获异常本身不算恢复。
+- 分类：正常完成 1、安全降级 7、受控失败 1、非预期失败 2、unsupported 1。零分母返回 null，无加权总分。
+- Safety Violation Count：**1**，即不可恢复的推理异常后 finished 的状态歧义。12 例均通过报告证据一致性检查，没有实际混入虚构金融数值或错误 ticker。
+- 保留的 P2-A 指标：工具集合 macro P/R/F1=1.0，grounding=12/12，task_completed=10/12，17 次工具尝试、6 个 State 错误。集合匹配高分与报告完成状态不掩盖两项 reliability 失败。
+- 原有 P2-A 单独重跑：12/12 完成且 grounded，25 次工具尝试、3 个预期 State 错误；没有回归。
+
+### 两项生产行为问题的证据
+
+1. `app/graph/workflow.py:306` 只读取前序 State 的 existing_signatures；`:319` 检查该集合，而 `:331` 只追加 new_signatures，没有在当前批次更新已检查集合。两个相同请求均进入 jobs，实际 trace 有两次成功 get_stock_price。跨步骤去重仍有效，原有回归测试继续通过。
+2. `app/graph/workflow.py:189` 的 LLM 异常处理保留错误，并在 `:207` 设置 error；`:436` 的 Finalize 将非 timeout 状态归为 finished。LLM 异常案例的最终 trace/status 确认该行为。生产 finished 表示报告收尾，错误并未被抹掉，报告也没有伪造数据；本评估的更严格状态规则要求不可恢复推理失败在 terminal status 中可区分，因此记为 failure_reported_success。本轮没有修改上述代码。
+
+### 实际修改或新增的文件
+
+| 文件 | 内容 |
+| --- | --- |
+| `app/evaluation/evaluator.py` | 复用顺序 Runner 的构造/执行扩展点和子类 Dataset 校验 |
+| `app/evaluation/reliability_dataset.py`（新增） | 版本、故障、预期行为和脚本合法性校验 |
+| `app/evaluation/datasets/reliability-v1.json`（新增） | 12 个版本化 Reliability Cases |
+| `app/evaluation/failure_injection.py`（新增） | 离线 Fake Model、工具/fixture 注入和注入记录 |
+| `app/evaluation/checkpoint_evaluation.py`（新增） | 原生暂停/恢复、跨 thread 隔离及 END 重读验证 |
+| `app/evaluation/reliability.py`（新增） | 安全违规、恢复/终止判定、保留失败的 JSON 和分母 |
+| `examples/evaluate.py` | 新增 --suite reliability，默认 baseline 保留 |
+| `tests/test_reliability_evaluation.py`（新增） | 42 项离线回归，明确断言真实 fail/unsupported |
+| `README.md`、`README.zh-CN.md` | 简短 Reliability CLI 与适用范围说明 |
+| `docs/engineering-notes.md`、`docs/engineering-notes.zh-CN.md` | 审计、指标、注入、逐例结果、验证和限制 |
+| `docs/codex-log.md` | 只追加本阶段记录，保留全部历史 |
+
+共 13 个文件（7 个已跟踪文件修改、6 个新增文件）；新增 Dataset、测试和 4 个 Python 评估模块均在清单中。没有改动生产 Agent/Workflow/State/Checkpoint、Provider、金融公式、报告 Schema、Web UI 或真实 .env。
+
+### 实际执行的测试与验证
+
+复用既有 .venv：Python 3.12.8、pytest 9.2.0。Evaluation JSON 记录 langchain-core 1.8.1、langgraph 1.2.22、pydantic 2.14.3、numpy 2.5.5。没有安装或升级依赖。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `.venv/bin/python examples/evaluate.py --output /tmp/stockmind-p2-b-baseline.json` | 退出码 0；12/12 完成且 grounded，macro P/R/F1=1.0 |
+| `.venv/bin/python examples/evaluate.py --suite reliability --output /tmp/stockmind-p2-b-reliability.json` | 退出码 0；9 pass / 2 fail / 1 unsupported，JSON 包含失败和证据 |
+| `.venv/bin/python -m pytest tests/test_evaluation.py tests/test_reliability_evaluation.py -v` | 退出码 0；76 passed，2.43 秒，1 条缓存权限警告 |
+| `.venv/bin/python -m pytest -v` | 退出码 0；224 passed、0 failed、0 skipped，15.33 秒，1 条缓存权限警告 |
+| `.venv/bin/python -m compileall -q app tests`（首次沙箱执行） | 退出码 1；__pycache__ 字节码写入 PermissionError，属于环境权限限制 |
+| `.venv/bin/python -m compileall -q app tests`（获准重跑） | 退出码 0，无输出；不是将静态检查替代 pytest |
+| `git diff --check` | 退出码 0，无空白错误 |
+
+测试总数由 182 增至 224，净增 42 项；覆盖注入触发、重试成功的实际证据、取消、错误参数/ticker、同批重复调用的真实失败、LLM 异常与超时、部分与缺失数据、checkpoint 恢复/隔离/读失败、零分母和 unsupported、可检查违规证据、Schema 非法输入、重复运行、恶意环境配置不启用外部服务、JSON 与原有 12 例。pytest 全部通过表示评估器准确记录当前行为，不表示生产 Agent 没有 reliability 失败。
+
+最终只读核对：HEAD 中日志的 48,405 字节历史完整保留为当前文件前缀；原始及继续任务 Prompt 均存在。四份 README/engineering notes 的相对 Markdown 链接目标均存在；另行检查了 6 个未跟踪新文件的行尾空白。Git 最终清单为 13 个文件，生产模块与依赖配置 diff 为空。
+
+### 兼容性、已知限制与后续建议
+
+- 默认 P2-A CLI 和既有字段保留。Reliability 使用独立版本和模型，消费者应读 reliability.verdict 与其 failure_reasons，不能只看 task_completed。没有更改生产 State/Checkpoint/报告契约。
+- 保留两个生产行为问题，等待下一轮明确授权后再定向修复；本轮没有提高 Agent 分数或进入 P2-C。
+- timeout 已结束的 END checkpoint 自动重试为 unsupported。当前仅验证同进程 memory saver、短暂停和显式新建的恢复 Fake Model，不证明持久数据库、跨进程恢复、真实模型内存恢复或 deadline 续期。
+- 超时注入使用协作式异步 Event，不验证阻塞同步 Provider 线程在取消后是否真的停止，也不是实际网络延迟测试。
+- Grounding 共用生产 assembler oracle，无法独立发现该 oracle 自身的错误；数值/文案检查限于固定报告模板，不宣称真实金融事实或任意自由文本语义验证。
+- CLI 对成功写出完整评估 JSON 返回 0，即使存在 fail/unsupported；CI 使用者需要读取 verdict_counts，不能把进程退出码当成所有案例通过。
+- 输入、顺序、判定及稳定字段可复现，耗时/生成时间/观测时间戳不保证逐字节一致；只记录当前 runtime，没有验证所有可安装依赖组合。
+- 短时间预算在极慢环境可能触发额外失败；这些失败会保留在结果，不会被算为通过。
+- 没有调用真实 LLM、金融 API 或外部数据库；没有记录密钥、Token、真实 .env 内容或无意义终端噪声。
+
+### Git Commit 信息
+
+本阶段未执行 Commit 或 Push，没有新增 Commit ID。
+

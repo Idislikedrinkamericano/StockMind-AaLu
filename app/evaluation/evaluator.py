@@ -174,7 +174,7 @@ class Evaluator:
         self.language = language
 
     async def evaluate(self, dataset: EvaluationDataset) -> EvaluationReport:
-        dataset = EvaluationDataset.model_validate(dataset.model_dump())
+        dataset = type(dataset).model_validate(dataset.model_dump())
         runs = []
         for case in dataset.cases:
             agent = None
@@ -182,8 +182,8 @@ class Evaluator:
             try:
                 # Explicitly disable network telemetry from ambient environment settings.
                 with tracing_context(enabled=False):
-                    agent = self.agent_factory(case.ticker) if self.agent_factory else build_offline_agent(case, self.language)
-                    state = await agent.arun(case.question, ticker=case.ticker, thread_id=f"eval-{case.case_id}")
+                    agent = self._build_agent(case)
+                    state = await self._invoke_case(agent, case)
             except Exception as exc:
                 state = {"ticker": case.ticker, "language": self.language, "status": "error",
                          "errors": [f"{type(exc).__name__}: {exc}"]}
@@ -215,6 +215,12 @@ class Evaluator:
                 name: version(name) for name in ("langchain-core", "langgraph", "pydantic", "numpy")}},
             runs=runs, aggregate=aggregate,
         )
+
+    def _build_agent(self, case):
+        return self.agent_factory(case.ticker) if self.agent_factory else build_offline_agent(case, self.language)
+
+    async def _invoke_case(self, agent, case):
+        return await agent.arun(case.question, ticker=case.ticker, thread_id=f"eval-{case.case_id}")
 
     @staticmethod
     def _metrics(agent: Any, state: dict[str, Any], case: EvaluationCase, elapsed: float) -> RunMetrics:

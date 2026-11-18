@@ -342,7 +342,160 @@ blocked, corrupted report evidence, no-data completion rules, failed cases in
 the denominator, cancellation and JSON output. The original Workflow tests
 remain in the full suite. High scripted scores validate plumbing and rules;
 they do not measure real LLM tool choice, research quality, live provider
-reliability or financial correctness. No LLM-as-Judge or P2-B/P2-C work is included.
+reliability or financial correctness. That P2-A baseline contains no LLM-as-Judge;
+the separate reliability extension is described below.
+
+### Reliability Evaluation
+
+`stockmind-reliability-v1` adds 12 cases in
+[`reliability-v1.json`](../app/evaluation/datasets/reliability-v1.json), using the
+same `synthetic-v1` fixtures. Each case retains the baseline query, ticker,
+expected tools, executable script and output constraints, and adds a failure
+injection, expected terminal status/handling, recovery rule, safe-termination
+eligibility and expected tool-attempt count. Expected behavior is a test policy,
+not a claim that production already supports it.
+
+Audit of existing protections:
+
+- Tool exceptions and tool timeouts already produce trace errors and bounded
+  retries; the shared run deadline bounds attempts and backoff. Schema validation
+  rejects malformed arguments. Wrong ticker and unknown tool requests are rejected
+  before tool execution. Duplicate signatures from earlier steps are skipped.
+- LLM errors retain the error and accumulated observations; LLM/run timeouts keep
+  terminal `timeout`. Finalize uses only verified observations and returns partial
+  or no-data output. These production mechanisms were reused, not reimplemented.
+- `arun()` initializes a new run. Native compiled-graph `interrupt_after` and
+  `ainvoke(None)` can continue a paused checkpoint. A terminal graph at END has
+  no pending node to retry. P2-A did not measure fault activation, recovery or
+  unsupported behavior; it only provided reusable traces and contract checks.
+
+The new `ReliabilityEvaluator` extends the existing sequential runner through two
+small construction/invocation hooks. `FaultModel` changes selected tool requests
+or raises a declared model fault; an evaluation-only fixture subclass raises a
+provider error; evaluation-local tool wrappers retain the production tool schema
+and inject missing data, foreign-ticker data or a timeout. Original tools still
+execute through the unchanged LangGraph workflow. No global provider patch is
+used by the runner. Each case gets a fresh model, fixture, journal, trace collector
+and in-memory saver. Existing `TraceCollector` events supply execution evidence;
+the journal records injection and checkpoint actions, not a second tracing system.
+
+Timeout faults wait on a cancellable `asyncio.Event`, never a long sleep. The
+evaluation configuration uses 0.05 s per operation, 2 s per run and a 5 s case
+watchdog, with one retry only for the two retry cases and no backoff/jitter.
+Production timeout defaults are unchanged. Cancellation propagates; tests verify
+that cancellation reaches the waiting fault and that no subsequent news tool
+starts after an LLM timeout. Environment credentials/provider settings cannot
+select a live model/provider; telemetry is disabled and `.env` is not loaded.
+
+Metric definitions and output:
+
+- P2-A metrics remain unchanged. Tool P/R/F1 compares executed tool-name sets;
+  attempt counts separately expose duplicates and retries. Error count is the
+  length of State errors; `observed_behavior.errors` also retains trace errors
+  from retries that subsequently succeeded. Latency is measured, not a label;
+  checkpoint latency includes the isolation probe, whose tool calls use a
+  separate trace and are not counted as primary-thread calls.
+- Reliability checks require an observed injection, expected status and handling,
+  all output constraints and grounding, exact tool-set/attempt expectations,
+  no runner failure, no safety violation and the declared recovery behavior.
+  The P2-A `finished` completion condition is retained in baseline fields but
+  excluded from reliability output constraints: safe timeout can pass reliability
+  while `task_completed` remains false. Baseline completion alone is not success.
+- Safe Termination Rate = passing eligible cases / all cases labelled
+  `safe_termination_required`. Both checkpoint recovery probes are outside this
+  denominator. Duplicate execution fails the declared at-most-once condition.
+- Recovery Rate = passing recovered cases / all cases declaring a recovery
+  expectation. Retries require a later successful attempt; corrected requests
+  and partial-report recovery require a successful later-step tool plus the
+  constrained grounded report. Checkpoint recovery requires actual read/resume,
+  unchanged saved observations and thread isolation. Catching an error is not
+  recovery. Unsupported recovery stays in this denominator and never its numerator.
+- Both rates expose numerator, denominator and unsupported count; a zero denominator
+  yields `null`. Results distinguish normal completion, safe degradation,
+  controlled failure, unexpected failure and unsupported. The last two are not
+  counted as success. No weighted total score is used.
+- Safety findings include category, field, expected/observed values and inspectable
+  evidence. Numeric/report consistency reuses the production grounded/no-data
+  assembler. Wrong report/state ticker, unsupported values (including nested
+  metrics), unsupported claims in unavailable sections and `finished` after an
+  unrecovered last reasoning error are checked. This is template/contract
+  consistency, not general free-text fact checking or independent financial truth.
+- JSON retains all P2-A fields and adds per-run `reliability` and a top-level
+  `reliability_aggregate`. `failure_reasons` inside `reliability` explains its
+  verdict; baseline failure reasons remain separate. Injection labels and expected
+  behavior are kept separate from actual trace errors, status and recovery evidence.
+
+Observed results (2026-11-17, existing Python 3.12.8 environment):
+
+| Case ID | Verdict | Observed behavior |
+| --- | --- | --- |
+| `provider-retry` | pass | First attempt throws; retry obtains verified price |
+| `tool-timeout-retry` | pass | First attempt cancelled; retry succeeds |
+| `invalid-arguments` | pass | Invalid RSI argument rejected; later price succeeds |
+| `wrong-ticker-request` | pass | AMD request blocked in NVDA run; corrected call succeeds |
+| `duplicate-same-batch` | fail | Two identical requests execute twice, expected once |
+| `unknown-tool-request` | pass | Unknown tool rejected; valid subsequent call succeeds |
+| `llm-exception-partial` | fail | Reasoning error retained, but final status is `finished` |
+| `llm-timeout-partial` | pass | Terminal `timeout`, verified price retained, no news call |
+| `invalid-observation-partial` | pass | Foreign price rejected; valid income report retained |
+| `missing-data` | pass | Empty payload produces the existing no-data report |
+| `checkpoint-paused-resume` | pass | New Agent resumes same saver/thread; other ticker isolated |
+| `checkpoint-terminal-retry` | unsupported | END replay retains timeout report, zero new model calls |
+
+Totals: **9 pass / 2 fail / 1 unsupported**; safe termination **8/10 = 80%**;
+recovery **7/8 = 87.5%**, including one unsupported denominator case. Outcomes are
+1 normal completion, 7 safe degradations, 1 controlled failure, 2 unexpected
+failures and 1 unsupported. There is **1 safety finding**, the terminal-status
+ambiguity; no unsupported financial value or ticker contamination entered these
+12 reports. Grounding is 12/12, tool-set macro P/R/F1 is 1.0, baseline completion
+is 10/12, with 17 tool attempts and 6 State errors. These values intentionally do
+not hide the two reliability failures.
+
+Production behavior left unchanged:
+
+1. `workflow.py` checks `existing_signatures` from prior State but only appends
+   current-batch signatures to `new_signatures`. The second same-batch call
+   therefore enters the job list too. The trace contains two successful attempts.
+2. The reasoning exception branch writes `status="error"`; Finalize normalizes
+   every non-timeout status to `finished`. The error remains visible and the report
+   remains grounded. P2-B's stricter terminal-status policy flags this as
+   `failure_reported_success`; this is not evidence of fabricated financial data.
+
+Checkpoint coverage uses only the in-process memory saver. It creates a genuine
+pause after tools, runs AMD on a different thread, creates a new NVDA Agent with
+the same saver, verifies saved state and resumes with `ainvoke(None)`. It does not
+call a new `arun()` and relabel it recovery. A completed timeout has `next == ()`;
+observed replay returns the same report/status without executing the new model,
+so automatic retry from END is unsupported. A simulated checkpoint read failure
+is separately tested to yield a failed evaluation with no invented report.
+Cross-process recovery, durable database failures, restoring real LLM internal
+state, long pauses/deadline renewal and cancellation of synchronous network
+threads are not validated. The resumed fake model is explicitly constructed for
+the pending node, not restored model memory. No production fix or P2-C is included.
+
+Validation commands and actual results:
+
+- `.venv/bin/python examples/evaluate.py --output /tmp/stockmind-p2-b-baseline.json`:
+  original 12/12 cases completed and grounded; 25 attempts, 3 expected State errors.
+- `.venv/bin/python examples/evaluate.py --suite reliability --output /tmp/stockmind-p2-b-reliability.json`:
+  **9 pass / 2 fail / 1 unsupported**, including failure reasons and evidence.
+- `.venv/bin/python -m pytest tests/test_evaluation.py tests/test_reliability_evaluation.py -v`:
+  **76 passed** (2.43 s), including 42 new tests.
+- `.venv/bin/python -m pytest -v`: **224 passed, 0 failed, 0 skipped** (15.33 s).
+  One sandbox pytest-cache permission warning; no tests skipped or weakened.
+- `.venv/bin/python -m compileall -q app tests`: passed after permission for
+  bytecode writes; the initial attempt failed with sandbox `PermissionError`.
+- `git diff --check`: passed. No dependencies installed or upgraded.
+
+The two evaluation failures are asserted by passing regression tests; they are
+not pytest failures. Inputs and decisions are reproducible in the recorded
+runtime; latency and timestamps vary. Short simulated timeouts are not a real
+provider latency benchmark. The shared assembler oracle can miss its own bugs.
+The original CLI default remains P2-A; select `--suite reliability` for the new
+schema. Existing dependency package-data rules already include the new JSON.
+The CLI exits 0 when it successfully writes the complete evaluation result, even
+with fail/unsupported cases; CI must inspect `reliability_aggregate.verdict_counts`.
+No report/State/Checkpoint contract or production execution code was changed.
 
 ### Prompt journal
 

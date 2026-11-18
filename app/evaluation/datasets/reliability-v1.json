@@ -1,0 +1,614 @@
+{
+  "version": "stockmind-reliability-v1",
+  "data_kind": "synthetic-fixture",
+  "fixture_version": "synthetic-v1",
+  "description": "12 offline failure-injected contract cases. Synthetic fixtures are not real market data. Expected behavior is a test policy, not an assertion that the current Agent supports it. Failures and unsupported checkpoint recovery remain visible.",
+  "cases": [
+    {
+      "case_id": "provider-retry",
+      "scenario": "reliability",
+      "question": "Recover from one synthetic provider exception using the existing bounded retry; retain only valid NVDA data.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "provider_exception"
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "safe_degradation",
+        "description": "Recover from one synthetic provider exception using the existing bounded retry; retain only valid NVDA data.",
+        "safe_termination_required": true,
+        "recovery": "retry",
+        "tool_attempts": 2
+      }
+    },
+    {
+      "case_id": "tool-timeout-retry",
+      "scenario": "reliability",
+      "question": "Cancel the first timed-out tool attempt and recover using the existing retry.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "tool_timeout"
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "safe_degradation",
+        "description": "Cancel the first timed-out tool attempt and recover using the existing retry.",
+        "safe_termination_required": true,
+        "recovery": "retry",
+        "tool_attempts": 2
+      }
+    },
+    {
+      "case_id": "invalid-arguments",
+      "scenario": "reliability",
+      "question": "Reject an invalid RSI window, then complete a fixture price query without claiming RSI.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "calculate_rsi",
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "technical_analysis",
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ],
+        "absent_metrics": [
+          "rsi"
+        ],
+        "expected_error_count": 1,
+        "error_contains": [
+          "ValidationError"
+        ]
+      },
+      "script": [
+        {
+          "name": "calculate_rsi",
+          "args": {
+            "ticker": "NVDA",
+            "window": 14
+          }
+        },
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "invalid_arguments",
+        "tool": "calculate_rsi",
+        "replacement_args": {
+          "window": "not-an-integer"
+        }
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "safe_degradation",
+        "description": "Reject an invalid RSI window, then complete a fixture price query without claiming RSI.",
+        "safe_termination_required": true,
+        "recovery": "subsequent_tool",
+        "tool_attempts": 2
+      }
+    },
+    {
+      "case_id": "wrong-ticker-request",
+      "scenario": "reliability",
+      "question": "Reject an AMD request during NVDA research, then accept the corrected NVDA request.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ],
+        "expected_error_count": 1,
+        "error_contains": [
+          "Ticker mismatch"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "wrong_ticker",
+        "replacement_args": {
+          "ticker": "AMD"
+        }
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "safe_degradation",
+        "description": "Reject an AMD request during NVDA research, then accept the corrected NVDA request.",
+        "safe_termination_required": true,
+        "recovery": "subsequent_tool",
+        "tool_attempts": 1
+      }
+    },
+    {
+      "case_id": "duplicate-same-batch",
+      "scenario": "reliability",
+      "question": "Execute identical same-batch requests at most once; report repeated execution as a reliability failure.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "duplicate_batch"
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "normal_completion",
+        "description": "Execute identical same-batch requests at most once; report repeated execution as a reliability failure.",
+        "safe_termination_required": true,
+        "recovery": "none",
+        "tool_attempts": 1
+      }
+    },
+    {
+      "case_id": "unknown-tool-request",
+      "scenario": "reliability",
+      "question": "Reject a nonexistent tool name, then complete a valid fixture price request.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ],
+        "expected_error_count": 1,
+        "error_contains": [
+          "Unknown tool"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "unknown_tool"
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "safe_degradation",
+        "description": "Reject a nonexistent tool name, then complete a valid fixture price request.",
+        "safe_termination_required": true,
+        "recovery": "subsequent_tool",
+        "tool_attempts": 1
+      }
+    },
+    {
+      "case_id": "llm-exception-partial",
+      "scenario": "reliability",
+      "question": "Keep the valid price after an unrecovered reasoning exception and distinguish failure in terminal status.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ],
+        "expected_error_count": 1,
+        "error_contains": [
+          "injected llm exception"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "search_company_news",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "llm_exception",
+        "step": 2
+      },
+      "expected_behavior": {
+        "terminal_status": "error",
+        "handling": "controlled_failure",
+        "description": "Keep the valid price after an unrecovered reasoning exception and distinguish failure in terminal status.",
+        "safe_termination_required": true,
+        "recovery": "none",
+        "tool_attempts": 1
+      }
+    },
+    {
+      "case_id": "llm-timeout-partial",
+      "scenario": "reliability",
+      "question": "Stop reasoning on timeout, retain the verified price, and do not start the subsequent news call.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ],
+        "expected_error_count": 1,
+        "error_contains": [
+          "llm_timeout"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "search_company_news",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "llm_timeout",
+        "step": 2
+      },
+      "expected_behavior": {
+        "terminal_status": "timeout",
+        "handling": "controlled_failure",
+        "description": "Stop reasoning on timeout, retain the verified price, and do not start the subsequent news call.",
+        "safe_termination_required": true,
+        "recovery": "none",
+        "tool_attempts": 1
+      }
+    },
+    {
+      "case_id": "invalid-observation-partial",
+      "scenario": "reliability",
+      "question": "Reject a foreign-ticker price and still return independently verified NVDA income data.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price",
+        "get_income_statement"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "revenue"
+        ],
+        "expected_values": {
+          "revenue": 1000
+        },
+        "unavailable_sections": [
+          "market_analysis",
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ],
+        "absent_metrics": [
+          "price"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        },
+        {
+          "name": "get_income_statement",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "wrong_observation"
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "safe_degradation",
+        "description": "Reject a foreign-ticker price and still return independently verified NVDA income data.",
+        "safe_termination_required": true,
+        "recovery": "partial_report",
+        "tool_attempts": 2
+      }
+    },
+    {
+      "case_id": "missing-data",
+      "scenario": "reliability",
+      "question": "Return an explicitly unavailable no-data report when the only tool returns an empty payload.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "no_data",
+        "required_metrics": [],
+        "expected_values": {},
+        "unavailable_sections": [],
+        "forbidden_text": [
+          "999999"
+        ],
+        "absent_metrics": [
+          "price"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "missing_data"
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "safe_degradation",
+        "description": "Return an explicitly unavailable no-data report when the only tool returns an empty payload.",
+        "safe_termination_required": true,
+        "recovery": "none",
+        "tool_attempts": 1
+      }
+    },
+    {
+      "case_id": "checkpoint-paused-resume",
+      "scenario": "reliability",
+      "question": "Restore a paused native graph with a new Agent using the same in-memory saver; isolate another ticker/thread.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "checkpoint_pause"
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "normal_completion",
+        "description": "Restore a paused native graph with a new Agent using the same in-memory saver; isolate another ticker/thread.",
+        "safe_termination_required": false,
+        "recovery": "checkpoint",
+        "tool_attempts": 1
+      }
+    },
+    {
+      "case_id": "checkpoint-terminal-retry",
+      "scenario": "reliability",
+      "question": "Attempt continuation after a handled timeout at END; mark unsupported when replay only returns the old terminal state.",
+      "ticker": "NVDA",
+      "expected_tools": [
+        "get_stock_price"
+      ],
+      "constraints": {
+        "report_mode": "grounded",
+        "required_metrics": [
+          "price"
+        ],
+        "expected_values": {
+          "price": 100
+        },
+        "unavailable_sections": [
+          "valuation_analysis"
+        ],
+        "forbidden_text": [
+          "999999"
+        ],
+        "expected_error_count": 1,
+        "error_contains": [
+          "llm_timeout"
+        ]
+      },
+      "script": [
+        {
+          "name": "get_stock_price",
+          "args": {
+            "ticker": "NVDA"
+          }
+        }
+      ],
+      "final_text": "Only use verified fixture observations. Do not invent missing financial values.",
+      "failure": {
+        "kind": "checkpoint_terminal_replay",
+        "step": 2
+      },
+      "expected_behavior": {
+        "terminal_status": "finished",
+        "handling": "normal_completion",
+        "description": "Attempt continuation after a handled timeout at END; mark unsupported when replay only returns the old terminal state.",
+        "safe_termination_required": false,
+        "recovery": "checkpoint",
+        "tool_attempts": 1
+      }
+    }
+  ]
+}

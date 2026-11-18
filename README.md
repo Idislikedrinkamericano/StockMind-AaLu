@@ -154,6 +154,7 @@ root; that file delegates to `.[web]`.
 
 ```bash
 python examples/evaluate.py --output /tmp/stockmind-evaluation.json
+python examples/evaluate.py --suite reliability --output /tmp/stockmind-reliability.json
 ```
 
 Runs 12 versioned cases with fixed synthetic fixtures and scripted LLM responses,
@@ -161,6 +162,12 @@ regardless of API keys or provider settings. JSON includes tool-set Precision /
 Recall / F1, rule-based completion, report/observation consistency, and execution
 metrics. These are regression checks, not real-LLM performance or independent
 financial accuracy. See the [metric definitions and limits](docs/engineering-notes.md#evaluation-and-prompt-journal).
+
+The reliability suite adds 12 offline fault-injection cases for tools, LLMs,
+partial evidence, and in-memory checkpoints. JSON retains failures and unsupported
+recovery separately, with explicit safe-termination and recovery denominators.
+These scripted checks do not measure real-LLM reliability. See the
+[reliability results and limitations](docs/engineering-notes.md#reliability-evaluation).
 
 ## Tech Stack
 

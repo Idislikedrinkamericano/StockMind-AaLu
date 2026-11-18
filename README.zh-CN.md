@@ -142,12 +142,17 @@ python app.py
 
 ```bash
 python examples/evaluate.py --output /tmp/stockmind-evaluation.json
+python examples/evaluate.py --suite reliability --output /tmp/stockmind-reliability.json
 ```
 
 使用固定合成 fixtures 和脚本化 LLM 响应运行 12 个版本化案例，不随 API Key 或 Provider
 配置切换模式。JSON 包含工具集合 Precision / Recall / F1、规则化任务完成检查、报告与
 观测一致性及执行指标。这些是回归检查，不代表真实 LLM 性能或独立金融准确性验证。
 详见[指标定义与限制](docs/engineering-notes.zh-CN.md#评估与-prompt-记录)。
+
+可靠性套件新增 12 个离线故障注入案例，覆盖工具、LLM、部分证据和内存 checkpoint。
+JSON 分别保留失败与不支持的恢复结果，并明确安全终止率、恢复率的分母。这些脚本检查
+不衡量真实 LLM 可靠性。详见[可靠性结果与限制](docs/engineering-notes.zh-CN.md#可靠性评估)。
 
 ## 技术栈
 
