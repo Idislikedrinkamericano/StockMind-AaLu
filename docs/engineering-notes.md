@@ -43,9 +43,10 @@ existing reasoning text; it was not another LLM call.
   `final_llm_call` label also need updating; historical JSONL files are untouched.
 - Graph nodes/edges, report schema, State, and checkpoint contracts are unchanged.
   `final_report` still retains raw reasoning for state compatibility; only
-  `final_output` is the evidence-based report. Existing non-timeout runs still
-  close as `finished` after report assembly, with prior errors retained; this
-  status does not guarantee that every data request succeeded.
+  `final_output` is the evidence-based report. Finalize preserves `error`,
+  `timeout` and `max_iterations` instead of turning report assembly into success.
+  `finished` means the reasoning loop completed normally; handled tool errors or
+  missing data may still be present. See the hardening status semantics below.
 
 ## Runtime Safety
 
@@ -425,7 +426,7 @@ Metric definitions and output:
   verdict; baseline failure reasons remain separate. Injection labels and expected
   behavior are kept separate from actual trace errors, status and recovery evidence.
 
-Observed results (2026-11-17, existing Python 3.12.8 environment):
+P2-B pre-hardening results (2026-11-17, existing Python 3.12.8 environment):
 
 | Case ID | Verdict | Observed behavior |
 | --- | --- | --- |
@@ -451,7 +452,7 @@ ambiguity; no unsupported financial value or ticker contamination entered these
 is 10/12, with 17 tool attempts and 6 State errors. These values intentionally do
 not hide the two reliability failures.
 
-Production behavior left unchanged:
+Production behavior observed at the P2-B baseline (fixed in the section below):
 
 1. `workflow.py` checks `existing_signatures` from prior State but only appends
    current-batch signatures to `new_signatures`. The second same-batch call
@@ -471,7 +472,8 @@ is separately tested to yield a failed evaluation with no invented report.
 Cross-process recovery, durable database failures, restoring real LLM internal
 state, long pauses/deadline renewal and cancellation of synchronous network
 threads are not validated. The resumed fake model is explicitly constructed for
-the pending node, not restored model memory. No production fix or P2-C is included.
+the pending node, not restored model memory. That evaluation-only stage included
+no production fix or P2-C work.
 
 Validation commands and actual results:
 
@@ -495,7 +497,117 @@ The original CLI default remains P2-A; select `--suite reliability` for the new
 schema. Existing dependency package-data rules already include the new JSON.
 The CLI exits 0 when it successfully writes the complete evaluation result, even
 with fail/unsupported cases; CI must inspect `reliability_aggregate.verdict_counts`.
-No report/State/Checkpoint contract or production execution code was changed.
+That evaluation-only stage did not change report/State/Checkpoint contracts or
+production execution code.
+
+### Reliability Hardening (P2-B Fix)
+
+Preflight confirmed commit `7081acb` contains P2-B and the worktree was clean.
+The original 12-case dataset, failure injection and scoring rules are unchanged.
+Only the two exposed production defects and necessary status/trace consumers
+were adjusted; no provider, financial formula, report schema or graph structure
+was changed.
+
+The duplicate bug checked only signatures from previous State. The fix inserts
+each new signature into the node-local seen set immediately, before examining
+the next request. It uses the existing `tool_call_signature` canonical JSON
+(sorted object keys, including nested objects), preserving tool names and argument
+values. Different tool names, ticker values or arguments are not merged. A
+different ticker still needs its own valid single-stock run; wrong-ticker requests
+within a run remain blocked. No global cache or cross-thread state is introduced.
+New runs start fresh; existing prior-step suppression remains in place.
+
+Skipped requests retain their ToolMessage and requested-call record and emit a
+`tool_skipped` trace with the name, arguments and duplicate reason. The message
+says "already requested", not "already executed", because the first request
+may still be queued or may fail. These events are not `tool_call` attempts, errors
+or observations. CLI trace summaries and Web progress display the skip. Each
+distinct invocation still uses the unchanged retry, timeout and error path;
+skipping a duplicate never replaces the first invocation's bounded retry.
+
+The status bug occurred after the LLM handler had already set `error`: Finalize
+replaced all non-timeout states with `finished`. Finalize now preserves the node's
+status while assembling the same evidence-only report. The existing iteration-cap
+status is retained too, so hitting a limit is not presented as normal completion.
+The existing expired-deadline check still takes precedence and records `run_timeout`.
+The LLM error trace now also explicitly carries `final_status="error"`.
+
+| Status | Meaning after Finalize |
+| --- | --- |
+| `finished` | Normal reasoning-loop completion; handled tool errors or unavailable data may remain |
+| `error` | Unrecovered LLM exception; verified observations and a partial/no-data report are retained |
+| `timeout` | LLM/run deadline termination; only verified evidence is reported |
+| `max_iterations` | Iteration cap reached; safe report available, not normal completion |
+
+State already stored status as a string; no enum, field or report-schema change
+was needed. Its comment now includes timeout. CLI summaries, Agent `run`/`arun`,
+checkpoint serializers and Evaluation already consume the returned status.
+`invoke`/`ainvoke` still return a safe report without changing their API; consumers
+needing execution status should use `run`/`arun` or inspect the trace/checkpoint.
+P2-A completion correctly requires `finished`; Reliability can pass a controlled
+failure while baseline task completion is false. Its safety check was retained.
+The Web formatter now distinguishes failure, timeout and iteration limits from
+successful completion; the final report-ready message no longer uses a success
+checkmark. UI layout and research behavior are unchanged.
+
+| Reliability case | Before | After |
+| --- | --- | --- |
+| `provider-retry` | pass | pass |
+| `tool-timeout-retry` | pass | pass |
+| `invalid-arguments` | pass | pass |
+| `wrong-ticker-request` | pass | pass |
+| `duplicate-same-batch` | fail: two executions | pass: two requests, one execution, one skip |
+| `unknown-tool-request` | pass | pass |
+| `llm-exception-partial` | fail: finished | pass: error with verified partial report |
+| `llm-timeout-partial` | pass | pass |
+| `invalid-observation-partial` | pass | pass |
+| `missing-data` | pass | pass |
+| `checkpoint-paused-resume` | pass | pass |
+| `checkpoint-terminal-retry` | unsupported | unsupported |
+
+Actual results: **9/2/1 → 11/0/1 pass/fail/unsupported**. Safe Termination Rate
+**8/10 → 10/10 (100%)**; Recovery Rate stays **7/8 (87.5%)**, including the one
+unsupported recovery in its denominator; Safety Violation Count **1 → 0**.
+Outcomes are 2 normal completions, 7 safe degradations, 2 controlled failures and
+1 unsupported; no unexpected failure. All 12 reports remain grounding-consistent.
+Tool attempts drop from 17 to 16 and State errors stay 6. P2-A-style completion
+within this suite drops from 10/12 to 9/12 because the LLM exception is now honestly
+marked `error`; this is not a grounding or recovery regression. Original P2-A
+remains 12/12 completed, 25 tool attempts, 3 expected errors and macro P/R/F1=1.0.
+
+Validation on 2026-11-17, existing Python 3.12.8 / pytest 9.2.0:
+
+- Before/after CLI: `.venv/bin/python examples/evaluate.py --suite reliability
+  --output /tmp/stockmind-p2-b-fix-before.json` and the same command with
+  `/tmp/stockmind-p2-b-fix-after.json`: **9/2/1** and **11/0/1**, respectively.
+- `.venv/bin/python examples/evaluate.py --output /tmp/stockmind-p2-b-fix-baseline.json`:
+  original 12 P2-A cases completed and grounded.
+- `.venv/bin/python -m pytest tests/test_reliability_evaluation.py tests/test_reliability_hardening.py tests/test_workflow.py tests/test_finalize.py tests/test_phase3.py tests/test_evaluation.py -v`:
+  **135 passed** (2.85 s).
+- `.venv/bin/python -m pytest -v`: **246 passed, 0 failed, 0 skipped** (15.51 s).
+  One sandbox pytest-cache permission warning.
+- `.venv/bin/python -m compileall -q app tests`: initial sandbox bytecode-write
+  permission failure; `.venv/bin/python -m compileall -q app tests web` passed
+  after permission, also checking the modified Web code.
+- `git diff --check`: passed. No dependency installation or upgrade.
+
+The 22 new tests cover signature order/distinctions, tools-node and full Workflow
+dedupe, retries, separate tickers/threads/new runs, partial/no-data LLM failure in
+memory and SQLite `:memory:` checkpoints, terminal statuses versus deadlines,
+and bilingual Web formatting. Existing tests now assert the corrected behavior;
+reverting either fix would fail them. No cases or safety assertions were removed.
+Gradio is not installed: Web checks executed the real pure formatter via AST,
+without importing the UI, loading `.env`, starting a browser or claiming a browser
+test. Network access and real model/provider selection are blocked in new tests.
+
+Remaining limits: END timeout checkpoint replay still cannot retry failed research;
+the graph has no pending node. This round does not add recovery, alter fingerprint
+semantics beyond the existing canonical JSON, test every dependency combination,
+or establish real-LLM reliability. Different omitted/default arguments or numeric
+representations are not newly normalized. The shared assembler oracle and prior
+cross-process/cancellation limitations still apply. Existing consumers that treated
+any report as success must inspect status; trace consumers may now see
+`tool_skipped`. No P2-C work or commit/push was performed.
 
 ### Prompt journal
 

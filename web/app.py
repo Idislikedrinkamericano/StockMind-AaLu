@@ -96,12 +96,20 @@ def describe_event(etype, kw, lang):
     if etype == "tool_call":
         base = f"🔧 调用工具 `{name}`{lat_s}" if zh else f"🔧 Tool `{name}`{lat_s}"
         return base + (" ⚠️ 出错" if err else "")
+    if etype == "tool_skipped":
+        return f"⏭️ 跳过重复请求 `{name}`" if zh else f"⏭️ Skipped duplicate request `{name}`"
     if etype == "finalize":
         return "📝 组装研报（确定性）" if zh else "📝 Assembling report (deterministic)"
     if etype == "run_end":
         status = kw.get("final_status", kw.get("status", ""))
-        ok = "✅ 完成" if zh else "✅ Done"
-        return f"{ok}（{status}）" if status else ok
+        labels = {
+            "finished": "✅ 完成" if zh else "✅ Done",
+            "error": "❌ 运行失败" if zh else "❌ Run failed",
+            "timeout": "⏱️ 运行超时" if zh else "⏱️ Run timed out",
+            "max_iterations": "⚠️ 达到迭代上限" if zh else "⚠️ Iteration limit reached",
+        }
+        label = labels.get(status, "运行结束" if zh else "Run ended")
+        return f"{label}（{status}）" if status else label
     return None
 
 
@@ -232,7 +240,7 @@ async def run_research(ticker, lang, max_iter):
     chart_path = build_chart(ticker, tracer, lang)
     report_md = report_to_markdown(report, lang)
     metrics_md = metrics_to_markdown(report, lang)
-    done = "✅ 研报生成完毕" if zh else "✅ Report ready"
+    done = "📝 研报已组装" if zh else "📝 Report assembled"
     log.append(done)
     yield "\n".join(log[-40:]), report_md, metrics_md, chart_path
 

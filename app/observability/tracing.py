@@ -118,6 +118,8 @@ class TraceCollector:
                 label = "llm_reason"
             elif event.event_type == "tool_call":
                 label = event.tool_name or "tool"
+            elif event.event_type == "tool_skipped":
+                label = f"skip_duplicate ({event.tool_name})"
             elif event.event_type == "tool_result":
                 continue
             elif event.event_type == "finalize":

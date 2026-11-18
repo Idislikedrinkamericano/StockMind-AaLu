@@ -23,7 +23,9 @@ schema-valid JSON is not evidence on its own.
 ## Features
 
 - ReAct-style workflow with bounded iterations, tool retries, and LLM, tool,
-  and whole-run timeouts.
+  and whole-run timeouts; duplicate requests within a run are skipped.
+- Unrecovered LLM exceptions retain an `error` status while returning a safe
+  partial or no-data report. Handled data gaps do not automatically fail a run.
 - Market, financial-statement, news, technical-analysis, and valuation tools.
 - Deterministic MA, RSI, MACD, volatility, drawdown, P/E, EV/EBITDA, and FCF-yield
   calculations; DCF scenarios require a confirmed cash-flow and share basis.
@@ -194,6 +196,8 @@ These scripted checks do not measure real-LLM reliability. See the
   unavailable; annual EPS fallback is never labelled TTM.
 - This project does not provide trading execution, portfolio optimisation, or
   historical backtesting.
+- Checkpoint evaluation supports paused in-memory graph continuation; replaying
+  a completed timeout checkpoint at END does not retry the failed research.
 
 ## Documentation
 

@@ -52,8 +52,8 @@ def _case(result, case_id):
 @pytest.mark.parametrize("case_id,verdict", [
     ("provider-retry", "pass"), ("tool-timeout-retry", "pass"),
     ("invalid-arguments", "pass"), ("wrong-ticker-request", "pass"),
-    ("duplicate-same-batch", "fail"), ("unknown-tool-request", "pass"),
-    ("llm-exception-partial", "fail"), ("llm-timeout-partial", "pass"),
+    ("duplicate-same-batch", "pass"), ("unknown-tool-request", "pass"),
+    ("llm-exception-partial", "pass"), ("llm-timeout-partial", "pass"),
     ("invalid-observation-partial", "pass"), ("missing-data", "pass"),
     ("checkpoint-paused-resume", "pass"), ("checkpoint-terminal-retry", "unsupported"),
 ])
@@ -98,22 +98,29 @@ def test_invalid_arguments_wrong_ticker_and_unknown_tool_are_rejected(result):
     assert _case(result, "unknown-tool-request").requested_tools[0] == "nonexistent_reliability_tool"
 
 
-def test_same_batch_duplicate_is_not_hidden_by_set_scores(result):
+def test_same_batch_duplicate_is_skipped_without_inflating_set_scores(result):
     run = _case(result, "duplicate-same-batch")
     assert run.tool_selection.f1 == 1 and run.task_completed
-    assert run.execution.tool_call_count == run.execution.requested_tool_count == 2
+    assert run.execution.requested_tool_count == 2
+    assert run.execution.tool_call_count == run.execution.observation_count == 1
     assert run.reliability.expected_behavior.tool_attempts == 1
-    assert run.reliability.verdict == "fail" and run.reliability.failure_reasons == ["tool_attempts"]
+    assert run.reliability.verdict == "pass" and run.reliability.failure_reasons == []
+    skipped = [event for event in run.reliability.observed_behavior["trace"] if event["event_type"] == "tool_skipped"]
+    assert len(skipped) == 1 and json.loads(skipped[0]["tool_output"])["duplicate"]
+    assert skipped[0]["tool_name"] == "get_stock_price" and skipped[0]["error"] is None
     assert not run.reliability.safety_violations
 
 
 def test_llm_failure_and_timeout_have_distinct_terminal_assessments(result):
     error = _case(result, "llm-exception-partial")
     timeout = _case(result, "llm-timeout-partial")
-    assert error.execution.final_status == "finished" and error.errors
-    assert error.reliability.verdict == "fail"
-    violation = error.reliability.safety_violations[0]
-    assert violation.category == "failure_reported_success" and "injected llm exception" in violation.evidence
+    assert error.execution.final_status == "error" and error.errors
+    assert error.reliability.verdict == "pass" and not error.task_completed
+    assert error.reliability.safety_violations == []
+    assert error.reliability.outcome == "controlled_failure"
+    terminal_events = [event for event in error.reliability.observed_behavior["trace"]
+                       if event["event_type"] in {"finalize", "run_end"}]
+    assert [event["final_status"] for event in terminal_events] == ["error", "error"]
     assert timeout.execution.final_status == "timeout" and not timeout.task_completed
     assert timeout.reliability.outcome == "controlled_failure" and timeout.reliability.verdict == "pass"
     assert [event["phase"] for event in timeout.reliability.injection_events] == ["waiting", "cancelled"]
@@ -175,12 +182,12 @@ def test_checkpoint_read_failure_cannot_fake_recovery(monkeypatch):
 
 def test_denominators_include_failures_and_unsupported(result):
     totals = result.reliability_aggregate
-    assert totals["verdict_counts"] == {"pass": 9, "fail": 2, "unsupported": 1}
-    assert totals["safe_termination"] == {"numerator": 8, "denominator": 10, "rate": 0.8,
+    assert totals["verdict_counts"] == {"pass": 11, "fail": 0, "unsupported": 1}
+    assert totals["safe_termination"] == {"numerator": 10, "denominator": 10, "rate": 1.0,
                                            "unsupported_in_denominator": 0}
     assert totals["recovery"] == {"numerator": 7, "denominator": 8, "rate": 0.875,
                                   "unsupported_in_denominator": 1}
-    assert totals["safety_violation_count"] == totals["cases_with_safety_violations"] == 1
+    assert totals["safety_violation_count"] == totals["cases_with_safety_violations"] == 0
     empty = aggregate_reliability([])
     assert empty["recovery"]["rate"] is None and empty["safe_termination"]["rate"] is None
     unsupported_only = aggregate_reliability([_case(result, "checkpoint-terminal-retry")])
@@ -320,7 +327,7 @@ def test_cli_reliability_json_and_original_baseline(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["evaluate.py", "--suite", "reliability", "--lang", "zh"])
     asyncio.run(cli.main())
     result = ReliabilityReport.model_validate_json(capsys.readouterr().out)
-    assert result.language == "zh" and result.reliability_aggregate["verdict_counts"] == {"pass": 9, "fail": 2, "unsupported": 1}
+    assert result.language == "zh" and result.reliability_aggregate["verdict_counts"] == {"pass": 11, "fail": 0, "unsupported": 1}
     baseline = asyncio.run(Evaluator().evaluate(load_dataset()))
     assert len(baseline.runs) == 12 and all(run.task_completed and run.grounded for run in baseline.runs)
     assert baseline.aggregate["total_tool_calls"] == 25 and baseline.aggregate["total_errors"] == 3

@@ -194,6 +194,7 @@ def _make_agent_node(
                 agent_step=iteration,
                 latency_ms=latency_ms,
                 error=error,
+                final_status="error",
             )
             final_report = (
                 f"The reasoning model failed at step {iteration} ({error}). "
@@ -317,17 +318,26 @@ def _make_tools_node(
             new_tool_calls.append({"name": name, "args": args, "id": call_id, "step": agent_step})
 
             if signature in existing_signatures:
+                skipped = json.dumps({
+                    "duplicate": True,
+                    "message": "Identical tool call already requested in this run; skipped.",
+                })
                 tool_messages.append(
                     ToolMessage(
-                        content=json.dumps(
-                            {"duplicate": True, "message": "Identical tool call already executed; skipped."}
-                        ),
+                        content=skipped,
                         tool_call_id=call_id,
                         name=name,
                     )
                 )
+                tracer.record(
+                    event_type="tool_skipped", agent_step=agent_step,
+                    tool_name=name, tool_input=args, tool_output=skipped,
+                )
                 continue
 
+            # Include requests scheduled in this batch before considering the
+            # next call. This set is local to this run/node, never a global cache.
+            existing_signatures.add(signature)
             new_signatures.append(signature)
             requested_ticker = args.get("ticker")
             if state_ticker and requested_ticker is not None and str(requested_ticker).strip().upper() != state_ticker:
@@ -433,7 +443,8 @@ def _make_finalize_node(tracer: TraceCollector):
         start = time.perf_counter()
         report = _grounded_or_no_data_report(state, _infer_ticker(state))
         report = report.model_copy(update={"generated_at": _precise_now_iso()})
-        status = "timeout" if state.get("status") == "timeout" else "finished"
+        # Producing a safe report does not turn a failed/limited run into success.
+        status = state.get("status", "finished")
         updates: dict[str, Any] = {"final_output": report, "status": status}
         error = None
         # Safe local assembly still runs after a timeout. Never turn an expired

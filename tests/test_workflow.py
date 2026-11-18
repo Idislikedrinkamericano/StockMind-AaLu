@@ -58,7 +58,7 @@ def test_max_iterations_terminates_gracefully():
     ]
     agent = _make_agent(messages, max_iterations=3)
     state = agent.run("Analyze NVDA", ticker="NVDA")
-    assert state["status"] == "finished"  # finalize always closes the run
+    assert state["status"] == "max_iterations"  # A safe report is not normal completion.
     assert state["final_output"].ticker == "NVDA"
     assert state["iteration_count"] == 4  # one past the limit triggers termination
 

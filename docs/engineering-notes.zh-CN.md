@@ -32,8 +32,9 @@
   调整。依赖已移除事件或 `final_llm_call` 标签的 trace 消费者也需调整；历史 JSONL
   文件不修改。
 - 图节点/边、报告 Schema、State 和 checkpoint 契约保持不变。`final_report` 仍保留
-  原始推理以兼容 State；只有 `final_output` 是基于证据的报告。非 timeout 运行在报告
-  组装后仍按既有行为关闭为 `finished`，保留此前错误；该状态不保证所有数据请求成功。
+  原始推理以兼容 State；只有 `final_output` 是基于证据的报告。Finalize 保留 `error`、
+  `timeout` 和 `max_iterations`，不将组装报告等同于运行成功。`finished` 表示推理循环
+  正常结束，仍可能有已处理的工具错误或数据缺失；详见下文修复后的状态语义。
 
 ## 运行时安全
 
@@ -326,7 +327,7 @@ LLM 超时后不启动后续新闻工具。环境凭据/Provider 配置不会启
   `reliability.failure_reasons` 解释其判定，基线失败原因单独保留；注入标签、预期行为
   与实际 trace 错误、状态、恢复证据分开记录。
 
-实际结果（2026-11-17，现有 Python 3.12.8 环境）：
+P2-B 修复前结果（2026-11-17，现有 Python 3.12.8 环境）：
 
 | Case ID | 结果 | 实际行为 |
 | --- | --- | --- |
@@ -350,7 +351,7 @@ LLM 超时后不启动后续新闻工具。环境凭据/Provider 配置不会启
 P/R/F1 均为 1.0，基线任务完成为 10/12，记录 17 次工具尝试、6 个 State 错误。
 这些指标没有掩盖两项可靠性失败。
 
-保留未修复的生产行为：
+P2-B 基线观测到的生产行为（已在下文修复）：
 
 1. `workflow.py` 检查来自前序 State 的 `existing_signatures`，但仅将本批签名追加至
    `new_signatures`，所以同批第二个相同请求仍进入 jobs。trace 实际记录两次成功尝试。
@@ -364,7 +365,7 @@ Checkpoint 覆盖只使用进程内 memory saver：在 tools 后真正暂停，�
 不执行新模型，因此 END 后自动重试标记 unsupported。另有测试模拟 checkpoint
 读取失败，确认评估失败且不虚构报告。未验证跨进程恢复、持久数据库故障、真实 LLM
 内部状态恢复、长暂停/deadline 续期、同步网络线程取消。恢复使用的 Fake Model 是为
-待执行节点显式创建，并非恢复了模型内存。本轮不修复生产问题，也不进入 P2-C。
+待执行节点显式创建，并非恢复了模型内存。该评估建设阶段未修复生产问题，也未进入 P2-C。
 
 验证命令与实际结果：
 
@@ -386,7 +387,95 @@ Checkpoint 覆盖只使用进程内 memory saver：在 tools 后真正暂停，�
 `--suite reliability` 选择新 Schema；既有 package-data 规则已包含新增 JSON。
 CLI 成功写出完整评估结果时退出码为 0，即使有 fail/unsupported；CI 应读取
 `reliability_aggregate.verdict_counts`，不能把退出码当作全部案例通过。
-没有改变报告/State/Checkpoint 契约或生产执行代码。
+该评估建设阶段没有改变报告/State/Checkpoint 契约或生产执行代码。
+
+### 可靠性修复（P2-B Fix）
+
+开始前确认提交 `7081acb` 已包含 P2-B，工作区干净。原有 12 个案例的数据集、故障
+注入和评分规则保持不变。本轮只修复两项已发现的生产缺陷及必要的状态/trace 消费者，
+没有改变 Provider、金融公式、报告 Schema 或图结构。
+
+重复调用的根因是只检查前序 State 中的签名。本轮在检查下一请求前，立即将当前请求
+签名加入节点内局部已见集合，复用原有 `tool_call_signature` 的规范 JSON（包括嵌套
+对象的 key 排序），保留工具名和参数值的区别，不合并不同工具、ticker 或参数。
+不同 ticker 仍需各自合法的 single-stock run；同次运行中的错误 ticker 继续被拒绝。
+没有引入全局缓存或跨 thread 共享去重状态，新运行从空状态开始，跨轮去重保留。
+
+被跳过请求仍保留 ToolMessage 和请求记录，并产生带工具名、参数及原因的
+`tool_skipped` trace。文案说明“已经请求”，不再声称“已经执行”，因为第一份请求可能
+尚在队列中或执行失败。跳过事件不是 `tool_call`、错误或 observation。CLI trace
+摘要和 Web 进度均展示原因。不同调用仍走原有重试、超时和错误路径；跳过重复请求
+不会替代第一份调用的有上限重试。
+
+状态缺陷发生在 LLM handler 已设置 `error` 后：Finalize 将全部非 timeout 状态改为
+`finished`。现在 Finalize 保留节点状态，同时使用相同证据规则组装报告。已有迭代上限
+状态也保留，避免将达到上限误报为正常完成；原有 deadline 过期检查仍优先生效并记录
+`run_timeout`。LLM 异常 trace 也明确带有 `final_status="error"`。
+
+| Status | Finalize 后语义 |
+| --- | --- |
+| `finished` | 推理循环正常完成，仍允许已处理的工具错误和 unavailable 数据 |
+| `error` | 未恢复的 LLM 异常，保留已验证观测及部分/no-data 报告 |
+| `timeout` | LLM/run 时间预算耗尽，仅报告已验证证据 |
+| `max_iterations` | 达到迭代上限，可返回安全报告，但不算正常完成 |
+
+State 的 status 本来就是字符串，无需新增枚举、字段或修改报告 Schema；注释补齐
+timeout。CLI 摘要、Agent 的 `run`/`arun`、checkpoint 序列化和 Evaluation 均可消费
+返回的状态。`invoke`/`ainvoke` 继续兼容地返回安全报告；需要执行状态的调用方应使用
+`run`/`arun` 或读取 trace/checkpoint。P2-A 完成指标仍要求 `finished`，Reliability
+可将受控失败判为通过，同时基线任务完成为 false，原安全检查保留。Web 文案区分失败、
+超时、迭代上限和成功，报告就绪提示移除成功勾号；没有修改页面布局或研究业务逻辑。
+
+| Reliability 案例 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `provider-retry` | pass | pass |
+| `tool-timeout-retry` | pass | pass |
+| `invalid-arguments` | pass | pass |
+| `wrong-ticker-request` | pass | pass |
+| `duplicate-same-batch` | fail：执行两次 | pass：两次请求、一次执行、一次跳过 |
+| `unknown-tool-request` | pass | pass |
+| `llm-exception-partial` | fail：finished | pass：error，保留有效部分报告 |
+| `llm-timeout-partial` | pass | pass |
+| `invalid-observation-partial` | pass | pass |
+| `missing-data` | pass | pass |
+| `checkpoint-paused-resume` | pass | pass |
+| `checkpoint-terminal-retry` | unsupported | unsupported |
+
+实际结果：pass/fail/unsupported 从 **9/2/1 → 11/0/1**。安全终止率
+**8/10 → 10/10（100%）**；恢复率仍为 **7/8（87.5%）**，分母仍包含 1 个
+unsupported；安全违规 **1 → 0**。分类为正常完成 2、安全降级 7、受控失败 2、
+unsupported 1，无非预期失败。12 份报告全部保持 grounding 一致；工具尝试从 17 降至
+16，State 错误仍为 6。此套件中的 P2-A 任务完成指标从 10/12 变为 9/12，因为 LLM
+异常现在如实标为 `error`，并非证据或恢复回归。原有 P2-A 仍为 12/12 完成、25 次
+工具尝试、3 个预期错误，macro P/R/F1=1.0。
+
+实际验证（2026-11-17，现有 Python 3.12.8 / pytest 9.2.0）：
+
+- 修复前后 CLI：`.venv/bin/python examples/evaluate.py --suite reliability
+  --output /tmp/stockmind-p2-b-fix-before.json`，以及将路径改为
+  `/tmp/stockmind-p2-b-fix-after.json` 的相同命令，分别得到 **9/2/1** 和 **11/0/1**。
+- `.venv/bin/python examples/evaluate.py --output /tmp/stockmind-p2-b-fix-baseline.json`：
+  原有 12 个 P2-A 案例完成且 grounded。
+- `.venv/bin/python -m pytest tests/test_reliability_evaluation.py tests/test_reliability_hardening.py tests/test_workflow.py tests/test_finalize.py tests/test_phase3.py tests/test_evaluation.py -v`：
+  **135 passed**（2.85 秒）。
+- `.venv/bin/python -m pytest -v`：**246 passed、0 failed、0 skipped**（15.51 秒），
+  一条沙箱 pytest 缓存权限警告。
+- `.venv/bin/python -m compileall -q app tests`：首次沙箱字节码写入权限失败；
+  获准后 `.venv/bin/python -m compileall -q app tests web` 通过，也检查了修改的 Web 代码。
+- `git diff --check`：通过。未安装或升级依赖。
+
+新增 22 项测试，覆盖签名排序/区别、工具节点及完整 Workflow 去重、重试、不同 ticker/
+thread/新运行、memory 与 SQLite `:memory:` 中部分/no-data LLM 异常的 checkpoint、
+终止状态与 deadline、中英文 Web 文案。原有测试更新为正确行为，撤销任一修复将使
+回归失败；没有删除案例或安全断言。环境未安装 Gradio，Web 测试通过 AST 执行实际纯
+格式化函数，没有导入 UI、加载 `.env` 或启动浏览器，不宣称完成浏览器验证。新增测试
+阻止网络连接及真实模型/Provider 选择。
+
+剩余限制：END timeout checkpoint 没有待执行节点，仍无法重试。本轮没有增加恢复、
+改变已有规范 JSON 之外的 fingerprint 语义、测试所有依赖组合或证明真实 LLM 可靠性；
+省略/显式默认参数及不同数字表示未新增归一化。共用 assembler oracle、跨进程和取消
+方面的既有限制仍适用。把“有报告”视为成功的外部消费者须改为检查状态；trace 消费者
+可能看到新的 `tool_skipped`。没有进入 P2-C，也没有 Commit/Push。
 
 ### Prompt 记录
 

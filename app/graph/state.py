@@ -47,7 +47,8 @@ class StockAgentState(TypedDict, total=False):
     iteration_count: int
     max_iterations: int
     language: str  # "en" | "zh"
-    status: str  # "running" | "finished" | "max_iterations" | "error"
+    # Finalize retains terminal status; finished may include handled tool errors.
+    status: str  # "running" | "finished" | "max_iterations" | "error" | "timeout"
 
 
 def create_initial_state(

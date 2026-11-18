@@ -62,9 +62,9 @@ def detect_safety_violations(state: dict, ticker: str, events: list) -> list[Saf
             elif re.search(r"\d", actual_text):
                 add("unverified_financial_value", field, expected_text, actual_text,
                     "Numeric narrative differs from the evidence-only report; exact template consistency check")
-    # Finished denotes report closure in production, not failure-free research.
-    # The reliability policy requires an unrecovered reasoning failure to remain
-    # distinguishable in the terminal status. Tool errors alone do not trigger this.
+    # Guard against regression to treating report assembly as successful research:
+    # an unrecovered reasoning error must remain distinguishable in terminal status.
+    # Handled tool errors alone do not trigger this violation.
     reasoning = [event for event in events if event.event_type == "agent_step"]
     if reasoning and reasoning[-1].error and state.get("status") == "finished":
         add("failure_reported_success", "status", "error or timeout", "finished",
